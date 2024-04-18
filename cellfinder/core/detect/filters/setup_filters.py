@@ -3,7 +3,7 @@ from typing import Tuple
 
 import numpy as np
 
-from cellfinder.core.detect.filters.volume.ball_filter import BallFilter
+from cellfinder.core.detect.filters.volume.ball_filter_cuda import BallFilter
 from cellfinder.core.detect.filters.volume.structure_detection import (
     CellDetector,
 )
