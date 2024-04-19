@@ -2,8 +2,6 @@ import math
 import multiprocessing.pool
 import os
 from functools import partial
-from queue import Queue
-from threading import Lock
 from typing import Any, Callable, List, Optional, Tuple
 
 import numpy as np
@@ -75,33 +73,17 @@ class VolumeFilter(object):
 
     def process(
         self,
-        async_result_queue: Queue,
-        locks: List[Lock],
+        get_tile_mask,
+        signal_array,
         *,
         callback: Callable[[int], None],
     ) -> None:
         progress_bar = tqdm(total=self.n_planes, desc="Processing planes")
         for z in range(self.n_planes):
-            # Get result from the queue.
-            #
-            # It is important to remove the result from the queue here
-            # to free up memory once this plane has been processed by
-            # the 3D filter here
-            logger.debug(f"🏐 Waiting for plane {z}")
-            result = async_result_queue.get()
             # .get() blocks until the result is available
-            plane, mask = result.get()
-            logger.debug(f"🏐 Got plane {z}")
-
+            plane, mask = get_tile_mask(signal_array[z, :, :])
             self.ball_filter.append(plane, mask)
-
             if self.ball_filter.ready:
-                # Let the next 2D filter run
-                z_release = z + self.n_locks_release + 1
-                if z_release < len(locks):
-                    logger.debug(f"🔓 Releasing lock for plane {z_release}")
-                    locks[z_release].release()
-
                 self._run_filter()
 
             callback(self.z)

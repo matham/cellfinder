@@ -1,11 +1,12 @@
-import numpy as np
-from scipy.ndimage import gaussian_filter, laplace
-from scipy.signal import medfilt2d
+import torch
+from kornia.filters.gaussian import gaussian_blur2d
+from kornia.filters.laplacian import laplacian
+from kornia.filters.median import median_blur
 
 
 def enhance_peaks(
-    img: np.ndarray, clipping_value: float, gaussian_sigma: float = 2.5
-) -> np.ndarray:
+    img: torch.Tensor, clipping_value: float, gaussian_sigma: float = 2.5
+) -> torch.Tensor:
     """
     Enhances the peaks (bright pixels) in an input image.
 
@@ -31,15 +32,18 @@ def enhance_peaks(
     3. Multiplying by -1 (bright spots respond negative in a LoG).
     4. Rescaling image values to range from 0 to clipping value.
     """
-    type_in = img.dtype
-    filtered_img = medfilt2d(img.astype(np.float64))
-    filtered_img = gaussian_filter(filtered_img, gaussian_sigma)
-    filtered_img = laplace(filtered_img)
-    filtered_img *= -1
+    img = img.unsqueeze(0).unsqueeze(0)
+    filtered_img = median_blur(img, kernel_size=3)
+    filtered_img = gaussian_blur2d(
+        filtered_img,
+        2 * int(round(4 * gaussian_sigma)) + 1,
+        (gaussian_sigma, gaussian_sigma),
+    )
+    filtered_img = laplacian(filtered_img, kernel_size=3)
 
-    filtered_img -= filtered_img.min()
-    filtered_img /= filtered_img.max()
-
+    filtered_img.mul_(-1)
+    filtered_img.sub_(filtered_img.min())
+    filtered_img.div_(filtered_img.max())
     # To leave room to label in the 3d detection.
-    filtered_img *= clipping_value
-    return filtered_img.astype(type_in)
+    filtered_img.mul_(clipping_value)
+    return filtered_img[0, 0, :, :]

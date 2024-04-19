@@ -192,12 +192,8 @@ class BallFilter:
         self._num_z_added += 1
 
         # Add the new plane to the top of volume and inside_brain_tiles
-        self.volume[idx, :, :] = torch.as_tensor(plane.astype(np.float32)).to(
-            device="cuda"
-        )
-        self.inside_brain_tiles[idx, :, :] = torch.from_numpy(mask).to(
-            device="cuda"
-        )
+        self.volume[idx, :, :] = plane
+        self.inside_brain_tiles[idx, :, :] = mask
 
     def get_middle_plane(self) -> np.ndarray:
         """

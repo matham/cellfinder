@@ -2,8 +2,8 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Optional, Tuple
 
-import dask.array as da
 import numpy as np
+import torch
 
 from cellfinder.core import types
 from cellfinder.core.detect.filters.plane.classical_filter import enhance_peaks
@@ -60,13 +60,10 @@ class TileProcessor:
             outside (0) the brain.
         """
         laplace_gaussian_sigma = self.log_sigma_size * self.soma_diameter
-        plane = plane.T
-        np.clip(plane, 0, self.clipping_value, out=plane)
-        if lock is not None:
-            lock.acquire(blocking=True)
-        # Read plane from a dask array into memory as a numpy array
-        if isinstance(plane, da.Array):
-            plane = np.array(plane)
+        plane = torch.as_tensor(
+            plane.T.astype(np.float32), dtype=torch.float32, device="cuda"
+        )
+        torch.clip_(plane, 0, self.clipping_value)
 
         # Get tiles that are within the brain
         walker = TileWalker(plane, self.soma_diameter)
@@ -75,12 +72,12 @@ class TileProcessor:
 
         # Threshold the image
         thresholded_img = enhance_peaks(
-            plane.copy(),
+            plane,
             self.clipping_value,
             gaussian_sigma=laplace_gaussian_sigma,
         )
-        avg = np.mean(thresholded_img)
-        sd = np.std(thresholded_img)
+        avg = torch.mean(thresholded_img)
+        sd = torch.std(thresholded_img)
         threshold = avg + self.n_sds_above_mean_thresh * sd
         plane[thresholded_img > threshold] = self.threshold_value
 

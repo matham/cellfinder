@@ -224,28 +224,13 @@ def main(
         n_sds_above_mean_thresh,
     )
 
-    # Force spawn context
+    # Start 3D filter
+    mp_3d_filter.process(
+        mp_tile_processor.get_tile_mask, signal_array, callback=callback
+    )
+
     mp_ctx = multiprocessing.get_context("spawn")
     with mp_ctx.Pool(n_ball_procs) as worker_pool:
-        async_results, locks = _map_with_locks(
-            mp_tile_processor.get_tile_mask,
-            signal_array,  # type: ignore
-            worker_pool,
-        )
-
-        # Release the first set of locks for the 2D filtering
-        for i in range(min(n_ball_procs + ball_z_size, len(locks))):
-            logger.debug(f"🔓 Releasing lock for plane {i}")
-            locks[i].release()
-
-        # Start 3D filter
-        #
-        # This runs in the main thread, and blocks until the all the 2D and
-        # then 3D filtering has finished. As batches of planes are filtered
-        # by the 3D filter, it releases the locks of subsequent 2D filter
-        # processes.
-        mp_3d_filter.process(async_results, locks, callback=callback)
-
         # it's now done filtering, get results with pool
         cells = mp_3d_filter.get_results(worker_pool)
 

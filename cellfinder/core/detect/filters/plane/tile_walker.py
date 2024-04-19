@@ -1,8 +1,7 @@
 import math
-from typing import Generator, Tuple
 
-import numpy as np
-from numba import njit
+import torch
+import torch.nn.functional as F
 
 
 class TileWalker:
@@ -23,7 +22,7 @@ class TileWalker:
         self.mark_bright_tiles().
     """
 
-    def __init__(self, img: np.ndarray, soma_diameter: int) -> None:
+    def __init__(self, img: torch.Tensor, soma_diameter: int) -> None:
         self.img = img
         self.img_width, self.img_height = img.shape
         self.tile_width = soma_diameter * 2
@@ -31,36 +30,15 @@ class TileWalker:
 
         n_tiles_width = math.ceil(self.img_width / self.tile_width)
         n_tiles_height = math.ceil(self.img_height / self.tile_height)
-        self.bright_tiles_mask = np.zeros(
-            (n_tiles_width, n_tiles_height), dtype=bool
+        self.bright_tiles_mask = torch.zeros(
+            (n_tiles_width, n_tiles_height), dtype=torch.bool, device="cuda"
         )
 
         corner_tile = img[0 : self.tile_width, 0 : self.tile_height]
-        corner_intensity = np.mean(corner_tile)
-        corner_sd = np.std(corner_tile)
+        corner_intensity = torch.mean(corner_tile)
+        corner_sd = torch.std(corner_tile)
         # add 1 to ensure not 0, as disables
         self.out_of_brain_threshold = (corner_intensity + (2 * corner_sd)) + 1
-
-    def _get_tiles(self) -> Generator[Tuple[int, int, np.ndarray], None, None]:
-        """
-        Generator that yields tiles of the 2D image.
-
-        Notes
-        -----
-        The final tile in each dimension can have a smaller size than the
-        rest of the tiles if the tile shape does not exactly divide the
-        image shape.
-        """
-        for y in range(
-            0, self.img_height - self.tile_height, self.tile_height
-        ):
-            for x in range(
-                0, self.img_width - self.tile_width, self.tile_width
-            ):
-                tile = self.img[
-                    x : x + self.tile_width, y : y + self.tile_height
-                ]
-                yield x, y, tile
 
     def mark_bright_tiles(self) -> None:
         """
@@ -72,17 +50,12 @@ class TileWalker:
         if threshold == 0:
             return
 
-        for x, y, tile in self._get_tiles():
-            if not is_low_average(tile, threshold):
-                mask_x = x // self.tile_width
-                mask_y = y // self.tile_height
-                self.bright_tiles_mask[mask_x, mask_y] = True
-
-
-@njit
-def is_low_average(tile: np.ndarray, threshold: float) -> bool:
-    """
-    Return `True` if the average value of *tile* is below *threshold*.
-    """
-    avg = np.mean(tile)
-    return avg < threshold
+        bright = (
+            F.avg_pool2d(
+                self.img.unsqueeze(0),
+                (self.tile_width, self.tile_height),
+                ceil_mode=False,
+            )[0, :, :]
+            >= threshold
+        )
+        self.bright_tiles_mask[: bright.shape[0], : bright.shape[1]] = True
