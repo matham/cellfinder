@@ -3,16 +3,11 @@ from functools import lru_cache
 import numpy as np
 import torch
 import torch.nn.functional as F
-from numba.core import types
 
 from cellfinder.core.tools.array_operations import bin_mean_3d
 from cellfinder.core.tools.geometry import make_sphere
 
 DEBUG = False
-
-uint32_3d_type = types.uint32[:, :, :]
-bool_3d_type = types.bool_[:, :, :]
-float_3d_type = types.float64[:, :, :]
 
 
 @lru_cache(maxsize=50)
@@ -42,7 +37,7 @@ def get_kernel(ball_xy_size: int, ball_z_size: int) -> np.ndarray:
         upscaled_ball_radius,
         upscaled_ball_centre_position,
     )
-    sphere_kernel = sphere_kernel.astype(np.float64)
+    sphere_kernel = sphere_kernel.astype(np.float32)
     kernel = bin_mean_3d(
         sphere_kernel,
         bin_height=upscale_factor,
@@ -117,15 +112,26 @@ class BallFilter:
 
         kernel = np.moveaxis(get_kernel(ball_xy_size, ball_z_size), 2, 0)
         self.overlap_threshold = np.sum(self.overlap_fraction * kernel)
-        self.kernel_xy = kernel.shape[1:]
+        self.kernel_xy_size = kernel.shape[-2:]
+        self.kernel_z_size = ball_z_size
+
         kernel = torch.from_numpy(kernel).type(torch.float32)
         self.kernel = kernel.unsqueeze(0).unsqueeze(0).to(device="cuda")
 
         # Stores the current planes that are being filtered
         # first axis is z for faster rotating the z-axis
+        if batch_size >= ball_z_size:
+            # batch is larger than kernel
+            self.process_per_call = batch_size - ball_z_size + 1
+            self.leftover_per_call = batch_size - self.process_per_call
+            self.volume_z_size = self.leftover_per_call + batch_size
+        else:
+            self.process_per_call = 0
+            self.leftover_per_call = 0
+
         self.volume = torch.from_numpy(
             np.empty(
-                (ball_z_size, plane_width, plane_height),
+                (self.volume_z_size, plane_width, plane_height),
                 dtype=np.float32,
             )
         ).to(device="cuda")
@@ -139,7 +145,7 @@ class BallFilter:
         self.inside_brain_tiles = torch.from_numpy(
             np.empty(
                 (
-                    ball_z_size,
+                    self.volume_z_size,
                     tile_width,
                     tile_height,
                 ),
@@ -160,70 +166,72 @@ class BallFilter:
         """
         Return `True` if enough planes have been appended to run the filter.
         """
-        return self._num_z_added >= self.ball_z_size
+        return self._num_z_added >= self.kernel_z_size
 
-    def append(self, plane: np.ndarray, mask: np.ndarray) -> None:
+    def append(self, planes: np.ndarray, masks: np.ndarray) -> None:
         """
         Add a new 2D plane to the filter.
         """
-        if DEBUG:
-            assert [e for e in plane.shape[:2]] == [
-                e for e in self.volume.shape[1:]
-            ], 'plane shape mismatch, expected "{}", got "{}"'.format(
-                [e for e in self.volume.shape[1:]],
-                [e for e in plane.shape[:2]],
-            )
-            assert [e for e in mask.shape[:2]] == [
-                e for e in self.inside_brain_tiles.shape[1:]
-            ], 'mask shape mismatch, expected"{}", got {}"'.format(
-                [e for e in self.inside_brain_tiles.shape[1:]],
-                [e for e in mask.shape[:2]],
-            )
-
-        if self.ready:
+        num_z = planes.shape[0]
+        num_processed = 0
+        if self._num_z_added:
+            num_processed = self._num_z_added - self.kernel_z_size + 1
+            assert num_processed > 0
             # Shift everything down by one to make way for the new plane
             # this is faster than np.roll, especially with z-axis first
-            self.volume = torch.roll(self.volume, -1, 0)
+            self.volume = torch.roll(self.volume, -num_processed, 0)
             self.inside_brain_tiles = torch.roll(
-                self.inside_brain_tiles, -1, 0
+                self.inside_brain_tiles, -num_processed, 0
             )
 
+        self._num_z_added -= num_processed
+
         # index for *next* slice is num we added *so far* until max
-        idx = min(self._num_z_added, self.ball_z_size - 1)
-        self._num_z_added += 1
+        # idx = min(self._num_z_added, self.ball_z_size - 1)
+        num_z_added = self._num_z_added
 
         # Add the new plane to the top of volume and inside_brain_tiles
-        self.volume[idx, :, :] = plane
-        self.inside_brain_tiles[idx, :, :] = mask
+        self.volume[num_z_added : num_z_added + num_z, :, :] = planes
+        self.inside_brain_tiles[num_z_added : num_z_added + num_z, :, :] = (
+            masks
+        )
+
+        self._num_z_added += num_z
 
     def get_middle_planes(self) -> np.ndarray:
         """
         Get the plane in the middle of self.volume.
         """
-        return [
-            self.volume[self.middle_z_idx, :, :]
+        num_processed = self._num_z_added - self.kernel_z_size + 1
+        assert num_processed
+        middle = self.middle_z_idx
+        return (
+            self.volume[middle : middle + num_processed, :, :]
             .cpu()
             .numpy()
             .astype(np.uint32)
             .copy()
-        ]
+        )
 
     def walk(self, parallel: bool = False) -> None:
         # **don't** pass parallel as keyword arg - numba struggles with it
         # Highly optimised because most time critical
         max_width, max_height = self.tiled_xy
 
-        inside = self.inside_brain_tiles[self.middle_z_idx, :, :]
-        w, h = inside.shape
+        num_process = self._num_z_added - self.kernel_z_size + 1
+        middle = self.middle_z_idx
+
+        # inside = self.inside_brain_tiles[middle: middle + num_process, :, :]
+        # _, w, h = inside.shape
         # inside = inside.view(w, 1, h).expand(w,
         # self.tile_step_width, h).contiguous().view(-1, h)
         inside = (
-            self.inside_brain_tiles[self.middle_z_idx, :, :]
-            .repeat_interleave(self.tile_step_width, dim=0)
-            .repeat_interleave(self.tile_step_height, dim=1)
+            self.inside_brain_tiles[middle : middle + num_process, :, :]
+            .repeat_interleave(self.tile_step_width, dim=1)
+            .repeat_interleave(self.tile_step_height, dim=2)
         )
         # max_xxx may be larger than actual volume
-        sub_volume = self.volume[:, :max_width, :max_height]
+        sub_volume = self.volume[: self._num_z_added, :max_width, :max_height]
         # it may be larger if the last tile sticks outside the volume
 
         volume_tresh = (
@@ -232,9 +240,14 @@ class BallFilter:
             .unsqueeze(0)
             .type(self.kernel.dtype)
         )
-        overlaps = F.conv3d(volume_tresh, self.kernel, stride=1)[0, 0, 0, :, :]
-        inside = inside[: overlaps.shape[0], : overlaps.shape[1]]
+        overlaps = (
+            F.conv3d(volume_tresh, self.kernel, stride=1)[0, 0, :, :, :]
+            > self.overlap_threshold
+        )
+        inside = inside[:, : overlaps.shape[1], : overlaps.shape[2]]
 
         sub_volume[
-            self.middle_z_idx, : overlaps.shape[0], : overlaps.shape[1]
+            middle : middle + num_process,
+            : overlaps.shape[1],
+            : overlaps.shape[2],
         ][torch.logical_and(overlaps, inside)] = self.SOMA_CENTRE_VALUE

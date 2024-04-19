@@ -213,6 +213,7 @@ def main(
         max_cluster_size=max_cluster_size,
         outlier_keep=outlier_keep,
         artifact_keep=artifact_keep,
+        batch_size=batch_size,
     )
 
     clipping_val, threshold_value = setup_tile_filtering(signal_array[0, :, :])

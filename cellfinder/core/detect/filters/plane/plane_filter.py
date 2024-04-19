@@ -61,8 +61,8 @@ class TileProcessor:
         """
         laplace_gaussian_sigma = self.log_sigma_size * self.soma_diameter
         planes = torch.as_tensor(
-            np.moveaxis(planes.astype(np.float64), 2, 1),
-            dtype=torch.float64,
+            np.moveaxis(planes.astype(np.float32), 2, 1),
+            dtype=torch.float32,
             device="cuda",
         )
         torch.clip_(planes, 0, self.clipping_value)

@@ -65,6 +65,7 @@ class VolumeFilter(object):
             ball_xy_size=self.setup_params[2],
             ball_z_size=self.setup_params[3],
             ball_overlap_fraction=self.setup_params[4],
+            batch_size=batch_size,
         )
 
         self.cell_detector = get_cell_detector(
@@ -87,13 +88,13 @@ class VolumeFilter(object):
             planes, masks = get_tile_mask(
                 signal_array[z : z + batch_size, :, :]
             )
-            self.ball_filter.append(planes[0, :, :], masks[0, :, :])
+            self.ball_filter.append(planes, masks)
             if self.ball_filter.ready:
                 self._run_filter()
 
             callback(self.z)
             self.z += planes.shape[0]
-            progress_bar.update()
+            progress_bar.update(planes.shape[0])
 
         progress_bar.close()
         logger.debug("3D filter done")
