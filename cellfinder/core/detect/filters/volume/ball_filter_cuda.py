@@ -205,13 +205,15 @@ class BallFilter:
         num_processed = self._num_z_added - self.kernel_z_size + 1
         assert num_processed
         middle = self.middle_z_idx
-        return (
+        planes = (
             self.volume[middle : middle + num_processed, :, :]
             .cpu()
             .numpy()
             .astype(np.uint32)
             .copy()
         )
+        planes[planes >= 2**24 - 2] = np.iinfo(np.uint32).max
+        return planes
 
     def walk(self, parallel: bool = False) -> None:
         # **don't** pass parallel as keyword arg - numba struggles with it

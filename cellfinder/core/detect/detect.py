@@ -192,7 +192,7 @@ def main(
         raise ValueError("Input data must be 3D")
 
     setup_params = (
-        signal_array[0, :, :],
+        signal_array[0, :, :].astype(np.float32),
         soma_diameter,
         ball_xy_size,
         ball_z_size,
@@ -216,7 +216,9 @@ def main(
         batch_size=batch_size,
     )
 
-    clipping_val, threshold_value = setup_tile_filtering(signal_array[0, :, :])
+    clipping_val, threshold_value = setup_tile_filtering(
+        signal_array[0, :, :].astype(np.float32)
+    )
     # Create 2D analysis filter
     mp_tile_processor = TileProcessor(
         clipping_val,

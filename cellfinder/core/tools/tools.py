@@ -12,6 +12,8 @@ def get_max_possible_value(obj_in: np.ndarray) -> int:
     dtype = obj_in.dtype
     if np.issubdtype(dtype, np.integer):
         return np.iinfo(dtype).max
+    elif np.float32 == dtype:
+        return 2**24 - 1
     else:
         raise ValueError("obj_in must be a numpy array of integer data type.")
 
