@@ -227,6 +227,20 @@ class BallFilter:
         # _, w, h = inside.shape
         # inside = inside.view(w, 1, h).expand(w,
         # self.tile_step_width, h).contiguous().view(-1, h)
+        # inside = self.inside_brain_tiles[middle : middle + num_process, :, :]
+        # orig_w, orig_h = inside.shape[1:]
+        # final_w = self.tile_step_width * orig_w
+        # inside = (
+        #     inside
+        #     .view(num_process, orig_w, 1, orig_h)
+        #     .expand(num_process, orig_w, self.tile_step_width, orig_h)
+        #     .contiguous()
+        #     .view(num_process, -1, orig_h)
+        #     .view(num_process, final_w, orig_h, 1)
+        #     .expand(num_process, final_w, orig_h, self.tile_step_height)
+        #     .contiguous()
+        #     .view(num_process, final_w, -1)
+        # )
         inside = (
             self.inside_brain_tiles[middle : middle + num_process, :, :]
             .repeat_interleave(self.tile_step_width, dim=1)
