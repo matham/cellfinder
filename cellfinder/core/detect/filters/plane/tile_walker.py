@@ -24,21 +24,25 @@ class TileWalker:
 
     def __init__(self, img: torch.Tensor, soma_diameter: int) -> None:
         self.img = img
-        self.img_width, self.img_height = img.shape
+        self.img_width, self.img_height = img.shape[1:]
         self.tile_width = soma_diameter * 2
         self.tile_height = soma_diameter * 2
 
         n_tiles_width = math.ceil(self.img_width / self.tile_width)
         n_tiles_height = math.ceil(self.img_height / self.tile_height)
         self.bright_tiles_mask = torch.zeros(
-            (n_tiles_width, n_tiles_height), dtype=torch.bool, device="cuda"
+            (img.shape[0], n_tiles_width, n_tiles_height),
+            dtype=torch.bool,
+            device="cuda",
         )
 
-        corner_tile = img[0 : self.tile_width, 0 : self.tile_height]
-        corner_intensity = torch.mean(corner_tile)
-        corner_sd = torch.std(corner_tile)
+        corner_tiles = img[
+            :, 0 : self.tile_width, 0 : self.tile_height
+        ].reshape((img.shape[0], -1))
+        corner_intensity = torch.mean(corner_tiles, dim=1)
+        corner_sd = torch.std(corner_tiles, dim=1)
         # add 1 to ensure not 0, as disables
-        self.out_of_brain_threshold = (corner_intensity + (2 * corner_sd)) + 1
+        self.out_of_brain_thresholds = (corner_intensity + (2 * corner_sd)) + 1
 
     def mark_bright_tiles(self) -> None:
         """
@@ -46,16 +50,16 @@ class TileWalker:
         greater than the intensity threshold mark the tile as bright
         in self.bright_tiles_mask.
         """
-        threshold = self.out_of_brain_threshold
-        if threshold == 0:
-            return
+        thresholds = self.out_of_brain_thresholds.unsqueeze(1).unsqueeze(2)
 
         bright = (
             F.avg_pool2d(
-                self.img.unsqueeze(0),
+                self.img.unsqueeze(1),
                 (self.tile_width, self.tile_height),
                 ceil_mode=False,
-            )[0, :, :]
-            >= threshold
+            )[:, 0, :, :]
+            >= thresholds
         )
-        self.bright_tiles_mask[: bright.shape[0], : bright.shape[1]] = True
+        self.bright_tiles_mask[:, : bright.shape[1], : bright.shape[2]][
+            bright
+        ] = True

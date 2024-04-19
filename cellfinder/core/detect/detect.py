@@ -83,6 +83,7 @@ def main(
     artifact_keep: bool = False,
     save_planes: bool = False,
     plane_directory: Optional[str] = None,
+    batch_size: int = 1,
     *,
     callback: Optional[Callable[[int], None]] = None,
 ) -> List[Cell]:

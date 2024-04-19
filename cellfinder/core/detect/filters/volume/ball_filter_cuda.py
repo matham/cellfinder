@@ -80,6 +80,7 @@ class BallFilter:
         tile_step_height: int,
         threshold_value: int,
         soma_centre_value: int,
+        batch_size: int = 1,
     ):
         """
         Parameters
@@ -195,17 +196,17 @@ class BallFilter:
         self.volume[idx, :, :] = plane
         self.inside_brain_tiles[idx, :, :] = mask
 
-    def get_middle_plane(self) -> np.ndarray:
+    def get_middle_planes(self) -> np.ndarray:
         """
         Get the plane in the middle of self.volume.
         """
-        return (
+        return [
             self.volume[self.middle_z_idx, :, :]
             .cpu()
             .numpy()
             .astype(np.uint32)
             .copy()
-        )
+        ]
 
     def walk(self, parallel: bool = False) -> None:
         # **don't** pass parallel as keyword arg - numba struggles with it

@@ -38,6 +38,7 @@ class VolumeFilter(object):
         max_cluster_size: int = 5000,
         outlier_keep: bool = False,
         artifact_keep: bool = True,
+        batch_size: int = 1,
     ):
         self.soma_diameter = soma_diameter
         self.soma_size_spread_factor = soma_size_spread_factor
@@ -48,6 +49,7 @@ class VolumeFilter(object):
         self.max_cluster_size = max_cluster_size
         self.outlier_keep = outlier_keep
         self.n_locks_release = n_locks_release
+        self.batch_size = batch_size
 
         self.artifact_keep = artifact_keep
 
@@ -78,16 +80,19 @@ class VolumeFilter(object):
         *,
         callback: Callable[[int], None],
     ) -> None:
+        batch_size = self.batch_size
         progress_bar = tqdm(total=self.n_planes, desc="Processing planes")
-        for z in range(self.n_planes):
+        for z in range(0, self.n_planes, batch_size):
             # .get() blocks until the result is available
-            plane, mask = get_tile_mask(signal_array[z, :, :])
-            self.ball_filter.append(plane, mask)
+            planes, masks = get_tile_mask(
+                signal_array[z : z + batch_size, :, :]
+            )
+            self.ball_filter.append(planes[0, :, :], masks[0, :, :])
             if self.ball_filter.ready:
                 self._run_filter()
 
             callback(self.z)
-            self.z += 1
+            self.z += planes.shape[0]
             progress_bar.update()
 
         progress_bar.close()
@@ -100,14 +105,16 @@ class VolumeFilter(object):
         # because numba gets stuck (probably b/c class jit is new)
         self.ball_filter.walk(True)
 
-        middle_plane = self.ball_filter.get_middle_plane()
+        middle_planes = self.ball_filter.get_middle_planes()
         if self.save_planes:
-            self.save_plane(middle_plane)
+            for plane in middle_planes:
+                self.save_plane(plane)
 
         logger.debug(f"🏫 Detecting structures for plane {self.z}")
-        self.previous_plane = self.cell_detector.process(
-            middle_plane, self.previous_plane
-        )
+        for plane in middle_planes:
+            self.previous_plane = self.cell_detector.process(
+                plane, self.previous_plane
+            )
 
         logger.debug(f"🏫 Structures done for plane {self.z}")
 

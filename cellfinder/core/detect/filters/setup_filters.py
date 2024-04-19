@@ -17,6 +17,7 @@ def get_ball_filter(
     ball_xy_size: int,
     ball_z_size: int,
     ball_overlap_fraction: float = 0.6,
+    batch_size: int = 1,
 ) -> BallFilter:
     # thrsh_val is used to clip the data in plane to make sure
     # a number is available to mark cells. soma_centre_val is the
@@ -38,6 +39,7 @@ def get_ball_filter(
         tile_step_height=tile_width,
         threshold_value=thrsh_val,
         soma_centre_value=soma_centre_val,
+        batch_size=batch_size,
     )
     return ball_filter
 

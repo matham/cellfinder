@@ -29,7 +29,7 @@ class TileProcessor:
     n_sds_above_mean_thresh: float
 
     def get_tile_mask(
-        self, plane: types.array, lock: Optional[Lock] = None
+        self, planes: types.array, lock: Optional[Lock] = None
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         This thresholds the input plane, and returns a mask indicating which
@@ -60,25 +60,30 @@ class TileProcessor:
             outside (0) the brain.
         """
         laplace_gaussian_sigma = self.log_sigma_size * self.soma_diameter
-        plane = torch.as_tensor(
-            plane.T.astype(np.float32), dtype=torch.float32, device="cuda"
+        planes = torch.as_tensor(
+            np.moveaxis(planes.astype(np.float64), 2, 1),
+            dtype=torch.float64,
+            device="cuda",
         )
-        torch.clip_(plane, 0, self.clipping_value)
+        torch.clip_(planes, 0, self.clipping_value)
 
         # Get tiles that are within the brain
-        walker = TileWalker(plane, self.soma_diameter)
+        walker = TileWalker(planes, self.soma_diameter)
         walker.mark_bright_tiles()
         inside_brain_tiles = walker.bright_tiles_mask
 
         # Threshold the image
         thresholded_img = enhance_peaks(
-            plane,
+            planes,
             self.clipping_value,
             gaussian_sigma=laplace_gaussian_sigma,
         )
-        avg = torch.mean(thresholded_img)
-        sd = torch.std(thresholded_img)
-        threshold = avg + self.n_sds_above_mean_thresh * sd
-        plane[thresholded_img > threshold] = self.threshold_value
 
-        return plane, inside_brain_tiles
+        planes_1d = thresholded_img.view(thresholded_img.shape[0], -1)
+        avg = torch.mean(planes_1d, dim=1, keepdim=True).unsqueeze(2)
+        sd = torch.std(planes_1d, dim=1, keepdim=True).unsqueeze(2)
+        threshold = avg + self.n_sds_above_mean_thresh * sd
+
+        planes[thresholded_img > threshold] = self.threshold_value
+
+        return planes, inside_brain_tiles
