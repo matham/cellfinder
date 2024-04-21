@@ -20,6 +20,7 @@ from threading import Lock
 from typing import Callable, List, Optional, Sequence, Tuple, TypeVar
 
 import numpy as np
+import torch
 from brainglobe_utils.cells.cells import Cell
 from brainglobe_utils.general.system import get_num_processes
 from numba import set_num_threads
@@ -83,7 +84,8 @@ def main(
     artifact_keep: bool = False,
     save_planes: bool = False,
     plane_directory: Optional[str] = None,
-    batch_size: int = 1,
+    batch_size: int = 16,
+    torch_device: str = "cpu",
     *,
     callback: Optional[Callable[[int], None]] = None,
 ) -> List[Cell]:
@@ -200,6 +202,11 @@ def main(
         start_plane,
     )
 
+    if batch_size < ball_z_size:
+        raise ValueError(
+            f"batch_size={batch_size} < ball_z_size (kernel)={ball_z_size}"
+        )
+
     # Create 3D analysis filter
     mp_3d_filter = VolumeFilter(
         soma_diameter=soma_diameter,
@@ -214,6 +221,7 @@ def main(
         outlier_keep=outlier_keep,
         artifact_keep=artifact_keep,
         batch_size=batch_size,
+        torch_device=torch_device,
     )
 
     clipping_val, threshold_value = setup_tile_filtering(
@@ -226,6 +234,9 @@ def main(
         soma_diameter,
         log_sigma_size,
         n_sds_above_mean_thresh,
+        torch_dtype=torch.float32,
+        torch_device=torch_device,
+        plane_shape=signal_array[0, :, :].shape[::-1],
     )
 
     # Start 3D filter

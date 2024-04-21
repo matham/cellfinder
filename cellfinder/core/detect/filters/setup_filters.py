@@ -2,6 +2,7 @@ import math
 from typing import Tuple
 
 import numpy as np
+import torch
 
 from cellfinder.core.detect.filters.volume.ball_filter_cuda import BallFilter
 from cellfinder.core.detect.filters.volume.structure_detection import (
@@ -16,8 +17,10 @@ def get_ball_filter(
     soma_diameter: int,
     ball_xy_size: int,
     ball_z_size: int,
-    ball_overlap_fraction: float = 0.6,
-    batch_size: int = 1,
+    ball_overlap_fraction: float,
+    batch_size: int,
+    torch_dtype: torch.dtype,
+    torch_device: str,
 ) -> BallFilter:
     # thrsh_val is used to clip the data in plane to make sure
     # a number is available to mark cells. soma_centre_val is the
@@ -40,6 +43,8 @@ def get_ball_filter(
         threshold_value=thrsh_val,
         soma_centre_value=soma_centre_val,
         batch_size=batch_size,
+        torch_dtype=torch_dtype,
+        torch_device=torch_device,
     )
     return ball_filter
 

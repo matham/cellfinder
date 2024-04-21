@@ -64,6 +64,8 @@ class BallFilter:
     spherical kernel.
     """
 
+    num_batches_before_ready: int
+
     def __init__(
         self,
         plane_width: int,
@@ -75,7 +77,9 @@ class BallFilter:
         tile_step_height: int,
         threshold_value: int,
         soma_centre_value: int,
-        batch_size: int = 1,
+        batch_size: int,
+        torch_dtype: torch.dtype,
+        torch_device: str,
     ):
         """
         Parameters
@@ -115,43 +119,38 @@ class BallFilter:
         self.kernel_xy_size = kernel.shape[-2:]
         self.kernel_z_size = ball_z_size
 
-        kernel = torch.from_numpy(kernel).type(torch.float32)
-        self.kernel = kernel.unsqueeze(0).unsqueeze(0).to(device="cuda")
+        kernel = torch.from_numpy(kernel).type(torch_dtype).pin_memory()
+        self.kernel = (
+            kernel.unsqueeze(0)
+            .unsqueeze(0)
+            .to(device=torch_device, non_blocking=True)
+        )
 
         # Stores the current planes that are being filtered
         # first axis is z for faster rotating the z-axis
-        if batch_size >= ball_z_size:
-            # batch is larger than kernel
-            self.process_per_call = batch_size - ball_z_size + 1
-            self.leftover_per_call = batch_size - self.process_per_call
-            self.volume_z_size = self.leftover_per_call + batch_size
-        else:
-            self.process_per_call = 0
-            self.leftover_per_call = 0
-
-        self.volume = torch.from_numpy(
-            np.empty(
-                (self.volume_z_size, plane_width, plane_height),
-                dtype=np.float32,
+        if batch_size < ball_z_size:
+            raise ValueError(
+                f"batch_size={batch_size} < ball_z_size (kernel)={ball_z_size}"
             )
-        ).to(device="cuda")
+        self.num_batches_before_ready = 1
+
+        self.volume = torch.empty(
+            (0, plane_width, plane_height), dtype=torch_dtype
+        )
         # Index of the middle plane in the volume
         self.middle_z_idx = int(np.floor(ball_z_size / 2))
-        self._num_z_added = 0
 
         # first axis is z
         tile_width = int(np.ceil(plane_width / tile_step_width))
         tile_height = int(np.ceil(plane_height / tile_step_height))
-        self.inside_brain_tiles = torch.from_numpy(
-            np.empty(
-                (
-                    self.volume_z_size,
-                    tile_width,
-                    tile_height,
-                ),
-                dtype=np.bool_,
-            )
-        ).to(device="cuda")
+        self.inside_brain_tiles = torch.empty(
+            (
+                0,
+                tile_width,
+                tile_height,
+            ),
+            dtype=torch.bool,
+        )
 
         # Get extents of image that are covered by tiles
         tile_mask_covered_img_width = tile_width * self.tile_step_width
@@ -166,61 +165,52 @@ class BallFilter:
         """
         Return `True` if enough planes have been appended to run the filter.
         """
-        return self._num_z_added >= self.kernel_z_size
+        return self.volume.shape[0] >= self.kernel_z_size
 
     def append(self, planes: np.ndarray, masks: np.ndarray) -> None:
         """
         Add a new 2D plane to the filter.
         """
-        num_z = planes.shape[0]
-        num_processed = 0
-        if self._num_z_added:
-            num_processed = self._num_z_added - self.kernel_z_size + 1
-            assert num_processed > 0
-            # Shift everything down by one to make way for the new plane
-            # this is faster than np.roll, especially with z-axis first
-            self.volume = torch.roll(self.volume, -num_processed, 0)
-            self.inside_brain_tiles = torch.roll(
-                self.inside_brain_tiles, -num_processed, 0
+        if self.volume.shape[0]:
+            num_remaining = self.kernel_z_size - (self.middle_z_idx + 1)
+            num_remaining_with_padding = num_remaining + self.middle_z_idx
+            self.volume = torch.cat(
+                [self.volume[-num_remaining_with_padding:, :, :], planes],
+                dim=0,
             )
-
-        self._num_z_added -= num_processed
-
-        # index for *next* slice is num we added *so far* until max
-        # idx = min(self._num_z_added, self.ball_z_size - 1)
-        num_z_added = self._num_z_added
-
-        # Add the new plane to the top of volume and inside_brain_tiles
-        self.volume[num_z_added : num_z_added + num_z, :, :] = planes
-        self.inside_brain_tiles[num_z_added : num_z_added + num_z, :, :] = (
-            masks
-        )
-
-        self._num_z_added += num_z
+            self.inside_brain_tiles = torch.cat(
+                [
+                    self.inside_brain_tiles[
+                        -num_remaining_with_padding:, :, :
+                    ],
+                    masks,
+                ],
+                dim=0,
+            )
+        else:
+            self.volume = planes.clone()
+            self.inside_brain_tiles = masks.clone()
 
     def get_middle_planes(self) -> np.ndarray:
         """
         Get the plane in the middle of self.volume.
         """
-        num_processed = self._num_z_added - self.kernel_z_size + 1
+        num_processed = self.volume.shape[0] - self.kernel_z_size + 1
         assert num_processed
         middle = self.middle_z_idx
         planes = (
             self.volume[middle : middle + num_processed, :, :]
             .cpu()
             .numpy()
-            .astype(np.uint32)
             .copy()
         )
-        planes[planes >= 2**24 - 2] = np.iinfo(np.uint32).max
         return planes
 
     def walk(self, parallel: bool = False) -> None:
         # **don't** pass parallel as keyword arg - numba struggles with it
         # Highly optimised because most time critical
         max_width, max_height = self.tiled_xy
-
-        num_process = self._num_z_added - self.kernel_z_size + 1
+        num_process = self.volume.shape[0] - self.kernel_z_size + 1
         middle = self.middle_z_idx
 
         # inside = self.inside_brain_tiles[middle: middle + num_process, :, :]
@@ -247,7 +237,7 @@ class BallFilter:
             .repeat_interleave(self.tile_step_height, dim=2)
         )
         # max_xxx may be larger than actual volume
-        sub_volume = self.volume[: self._num_z_added, :max_width, :max_height]
+        sub_volume = self.volume[:, :max_width, :max_height]
         # it may be larger if the last tile sticks outside the volume
 
         volume_tresh = (
@@ -256,6 +246,7 @@ class BallFilter:
             .unsqueeze(0)
             .type(self.kernel.dtype)
         )
+        # pherical kernel is symetric so convolution=corrolation
         overlaps = (
             F.conv3d(volume_tresh, self.kernel, stride=1)[0, 0, :, :, :]
             > self.overlap_threshold
