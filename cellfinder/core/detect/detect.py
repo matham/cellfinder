@@ -243,6 +243,7 @@ def main(
     mp_3d_filter.process(
         mp_tile_processor.get_tile_mask, signal_array, callback=callback
     )
+    return
 
     mp_ctx = multiprocessing.get_context("spawn")
     with mp_ctx.Pool(n_ball_procs) as worker_pool:
