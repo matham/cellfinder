@@ -239,10 +239,11 @@ def main(
         plane_shape=signal_array[0, :, :].shape[::-1],
     )
 
-    # Start 3D filter
-    mp_3d_filter.process(
-        mp_tile_processor.get_tile_mask, signal_array, callback=callback
-    )
+    with torch.inference_mode(True):
+        # Start 3D filter
+        mp_3d_filter.process(
+            mp_tile_processor.get_tile_mask, signal_array, callback=callback
+        )
     return
 
     mp_ctx = multiprocessing.get_context("spawn")

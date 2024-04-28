@@ -93,40 +93,45 @@ class VolumeFilter(object):
         outgoing_tensors: Queue,
         data: types.array,
     ) -> None:
-        try:
-            batch_size = self.batch_size
-            plane_shape = self.setup_params[0].shape[::-1]
+        with torch.inference_mode(True):
+            try:
+                batch_size = self.batch_size
+                plane_shape = self.setup_params[0].shape[::-1]
 
-            for _ in range(self.n_buffered_batches):
-                incoming_tensors.put(
-                    (
-                        "tensor",
-                        torch.empty(
-                            (batch_size, *plane_shape),
-                            dtype=torch.float32,
-                            pin_memory=True,
-                        ),
+                for _ in range(self.n_buffered_batches):
+                    incoming_tensors.put(
+                        (
+                            "tensor",
+                            torch.empty(
+                                (batch_size, *plane_shape),
+                                dtype=torch.float32,
+                                pin_memory=True,
+                            ),
+                        )
                     )
-                )
 
-            for z in range(0, self.n_planes, batch_size):
-                np_data = np.asarray(
-                    data[z : z + batch_size, :, :], dtype=np.float32
-                )
-                np_data = np.moveaxis(np_data, 1, 2)
-                if not np_data.shape[0]:
-                    return
+                for z in range(0, self.n_planes, batch_size):
+                    np_data = np.asarray(
+                        data[z : z + batch_size, :, :], dtype=np.float32
+                    )
+                    np_data = np.moveaxis(np_data, 1, 2)
+                    if not np_data.shape[0]:
+                        return
 
-                msg, tensor = incoming_tensors.get(block=True, timeout=None)
-                if msg == "eof":
-                    return
+                    msg, tensor = incoming_tensors.get(
+                        block=True, timeout=None
+                    )
+                    if msg == "eof":
+                        return
 
-                tensor[: np_data.shape[0], :, :] = torch.from_numpy(np_data)
-                outgoing_tensors.put(("tensor", tensor))
-        except Exception as e:
-            outgoing_tensors.put(("exception", e))
-        finally:
-            outgoing_tensors.put(("eof", None))
+                    tensor[: np_data.shape[0], :, :] = torch.from_numpy(
+                        np_data
+                    )
+                    outgoing_tensors.put(("tensor", tensor))
+            except Exception as e:
+                outgoing_tensors.put(("exception", e))
+            finally:
+                outgoing_tensors.put(("eof", None))
 
     def process(
         self,
@@ -184,39 +189,44 @@ class VolumeFilter(object):
         progress_bar.close()
         logger.debug("3D filter done")
         # np.save("/home/matte/times2.npy", np.asarray(self.times))
-        raise ValueError
+        # raise ValueError
 
     def _run_filter_thread(
         self, incoming_tensors: Queue, callback, progress_bar
     ) -> None:
-        while True:
-            msg, middle_planes = incoming_tensors.get(block=True, timeout=None)
-            if msg == "eof":
-                return
-
-            middle_planes = middle_planes.astype(np.uint32)
-            middle_planes[middle_planes >= 2**24 - 2] = np.iinfo(np.uint32).max
-
-            logger.debug(f"🏐 Ball filtering plane {self.z}")
-            # filtering original images, the images should be large enough in
-            # x/y to benefit from parallelization. Note: don't pass arg as
-            # keyword arg because numba gets stuck (probably b/c class jit is
-            # new)
-            if self.save_planes:
-                for plane in middle_planes:
-                    self.save_plane(plane)
-
-            logger.debug(f"🏫 Detecting structures for plane {self.z}")
-            for plane in middle_planes:
-                self.previous_plane = self.cell_detector.process(
-                    plane, self.previous_plane
+        with torch.inference_mode(True):
+            while True:
+                msg, middle_planes = incoming_tensors.get(
+                    block=True, timeout=None
                 )
+                if msg == "eof":
+                    return
 
-                callback(self.z)
-                self.z += 1
-                progress_bar.update()
+                middle_planes = middle_planes.astype(np.uint32)
+                middle_planes[middle_planes >= 2**24 - 2] = np.iinfo(
+                    np.uint32
+                ).max
 
-            logger.debug(f"🏫 Structures done for plane {self.z}")
+                logger.debug(f"🏐 Ball filtering plane {self.z}")
+                # filtering original images, the images should be large enough
+                # in x/y to benefit from parallelization. Note: don't pass arg
+                # as keyword arg because numba gets stuck (probably b/c class
+                # jit is new)
+                if self.save_planes:
+                    for plane in middle_planes:
+                        self.save_plane(plane)
+
+                logger.debug(f"🏫 Detecting structures for plane {self.z}")
+                for plane in middle_planes:
+                    self.previous_plane = self.cell_detector.process(
+                        plane, self.previous_plane
+                    )
+
+                    callback(self.z)
+                    self.z += 1
+                    progress_bar.update()
+
+                logger.debug(f"🏫 Structures done for plane {self.z}")
 
     def save_plane(self, plane: np.ndarray) -> None:
         if self.plane_directory is None:
