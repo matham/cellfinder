@@ -5,11 +5,12 @@ import numpy as np
 from natsort import natsorted
 
 
-def get_max_possible_value(obj_in: np.ndarray) -> int:
+def get_max_possible_value(obj_in: np.ndarray, dtype=None) -> int:
     """
     Returns the maximum allowed value for a numpy array of integer data type.
     """
-    dtype = obj_in.dtype
+    if dtype is None:
+        dtype = obj_in.dtype
     if np.issubdtype(dtype, np.integer):
         return np.iinfo(dtype).max
     elif np.float32 == dtype:

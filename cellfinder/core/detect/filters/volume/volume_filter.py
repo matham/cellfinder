@@ -4,7 +4,7 @@ import os
 from functools import partial
 from queue import Queue
 from threading import Thread
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Callable, List, Optional
 
 import numpy as np
 import torch
@@ -13,11 +13,11 @@ from tifffile import tifffile
 from tqdm import tqdm
 
 from cellfinder.core import logger, types
-from cellfinder.core.detect.filters.setup_filters import (
-    get_ball_filter,
-    get_cell_detector,
-)
+from cellfinder.core.detect.filters.plane import TileProcessor
+from cellfinder.core.detect.filters.setup_filters import DetectionSettings
+from cellfinder.core.detect.filters.volume.ball_filter_cuda import BallFilter
 from cellfinder.core.detect.filters.volume.structure_detection import (
+    CellDetector,
     get_structure_centre,
 )
 from cellfinder.core.detect.filters.volume.structure_splitting import (
@@ -27,64 +27,20 @@ from cellfinder.core.detect.filters.volume.structure_splitting import (
 
 
 class VolumeFilter(object):
-    def __init__(
-        self,
-        *,
-        soma_diameter: float,
-        soma_size_spread_factor: float = 1.4,
-        setup_params: Tuple[np.ndarray, Any, int, int, float, Any],
-        n_planes: int,
-        n_locks_release: int,
-        save_planes: bool = False,
-        plane_directory: Optional[str] = None,
-        start_plane: int = 0,
-        max_cluster_size: int = 5000,
-        outlier_keep: bool = False,
-        artifact_keep: bool = True,
-        batch_size: int = 1,
-        torch_device: str = "cpu",
-    ):
-        self.soma_diameter = soma_diameter
-        self.soma_size_spread_factor = soma_size_spread_factor
-        self.n_planes = n_planes
+    def __init__(self, settings: DetectionSettings):
+        self.settings = settings
+
         # todo: first z should account for middle plane not being start plane
-        self.z = start_plane
-        self.save_planes = save_planes
-        self.plane_directory = plane_directory
-        self.max_cluster_size = max_cluster_size
-        self.outlier_keep = outlier_keep
-        self.n_locks_release = n_locks_release
-        self.batch_size = batch_size
-        self.torch_device = torch_device
-
-        self.artifact_keep = artifact_keep
-
-        self.clipping_val = None
-        self.threshold_value = None
-        self.setup_params = setup_params
+        self.z = settings.start_plane
 
         self.previous_plane: Optional[np.ndarray] = None
 
-        self.ball_filter = get_ball_filter(
-            plane=self.setup_params[0],
-            soma_diameter=self.setup_params[1],
-            ball_xy_size=self.setup_params[2],
-            ball_z_size=self.setup_params[3],
-            ball_overlap_fraction=self.setup_params[4],
-            batch_size=batch_size,
-            torch_dtype=torch.float32,
-            torch_device=torch_device,
-        )
+        self.ball_filter = BallFilter(settings=settings)
 
-        self.cell_detector = get_cell_detector(
-            plane_shape=self.setup_params[0].shape,  # type: ignore
-            ball_z_size=self.setup_params[3],
-            z_offset=self.setup_params[5],
-        )
-
-        self.times = []
-        self.n_buffered_batches = max(
-            max(3, 1), self.ball_filter.num_batches_before_ready
+        self.cell_detector = CellDetector(
+            width=settings.plane_dim1,
+            height=settings.plane_dim2,
+            start_z=settings.start_plane + self.ball_filter.first_valid_plane,
         )
 
     def feed_signal_batches(
@@ -95,10 +51,11 @@ class VolumeFilter(object):
     ) -> None:
         with torch.inference_mode(True):
             try:
-                batch_size = self.batch_size
-                plane_shape = self.setup_params[0].shape[::-1]
+                batch_size = self.settings.batch_size
+                plane_shape = self.settings.plane_shape
+                start_plane = self.settings.start_plane
 
-                for _ in range(self.n_buffered_batches):
+                for _ in range(self.settings.num_prefetch_batches):
                     incoming_tensors.put(
                         (
                             "tensor",
@@ -110,11 +67,15 @@ class VolumeFilter(object):
                         )
                     )
 
-                for z in range(0, self.n_planes, batch_size):
+                for z in range(0, self.settings.n_planes, batch_size):
                     np_data = np.asarray(
-                        data[z : z + batch_size, :, :], dtype=np.float32
+                        data[
+                            start_plane + z : start_plane + z + batch_size,
+                            :,
+                            :,
+                        ],
+                        dtype=np.float32,
                     )
-                    np_data = np.moveaxis(np_data, 1, 2)
                     if not np_data.shape[0]:
                         return
 
@@ -135,12 +96,14 @@ class VolumeFilter(object):
 
     def process(
         self,
-        get_tile_mask,
+        tile_processor: TileProcessor,
         signal_array,
         *,
         callback: Callable[[int], None],
     ) -> None:
-        progress_bar = tqdm(total=self.n_planes, desc="Processing planes")
+        progress_bar = tqdm(
+            total=self.settings.n_planes, desc="Processing planes"
+        )
 
         data_queue_in = Queue(maxsize=0)
         data_queue_back = Queue(maxsize=0)
@@ -150,7 +113,7 @@ class VolumeFilter(object):
         )
         data_thread.start()
 
-        filter_queue = Queue(maxsize=self.n_buffered_batches)
+        filter_queue = Queue(maxsize=self.settings.num_prefetch_batches)
         filter_thread = Thread(
             target=self._run_filter_thread,
             args=(filter_queue, callback, progress_bar),
@@ -166,8 +129,10 @@ class VolumeFilter(object):
                     raise Exception("Processing signal data failed") from value
                 tensor = value
 
-                tensor = tensor.to(device=self.torch_device, non_blocking=True)
-                planes, masks = get_tile_mask(tensor)
+                tensor = tensor.to(
+                    device=self.settings.torch_device, non_blocking=True
+                )
+                planes, masks = tile_processor.get_tile_mask(tensor)
                 self.ball_filter.append(planes, masks)
                 if self.ball_filter.ready:
                     self.ball_filter.walk(True)
@@ -212,7 +177,7 @@ class VolumeFilter(object):
                 # in x/y to benefit from parallelization. Note: don't pass arg
                 # as keyword arg because numba gets stuck (probably b/c class
                 # jit is new)
-                if self.save_planes:
+                if self.settings.save_planes:
                     for plane in middle_planes:
                         self.save_plane(plane)
 
@@ -222,26 +187,27 @@ class VolumeFilter(object):
                         plane, self.previous_plane
                     )
 
-                    callback(self.z)
+                    if callback is not None:
+                        callback(self.z)
                     self.z += 1
                     progress_bar.update()
 
                 logger.debug(f"🏫 Structures done for plane {self.z}")
 
     def save_plane(self, plane: np.ndarray) -> None:
-        if self.plane_directory is None:
+        if self.settings.plane_directory is None:
             raise ValueError(
                 "plane_directory must be set to save planes to file"
             )
         plane_name = f"plane_{str(self.z).zfill(4)}.tif"
-        f_path = os.path.join(self.plane_directory, plane_name)
+        f_path = os.path.join(self.settings.plane_directory, plane_name)
         tifffile.imsave(f_path, plane.T)
 
     def get_results(self, worker_pool: multiprocessing.Pool) -> List[Cell]:
         logger.info("Splitting cell clusters and writing results")
 
         max_cell_volume = sphere_volume(
-            self.soma_size_spread_factor * self.soma_diameter / 2
+            self.settings.soma_spread_factor * self.settings.soma_diameter / 2
         )
 
         cells = []
@@ -257,7 +223,7 @@ class VolumeFilter(object):
                 cell_centre = get_structure_centre(cell_points)
                 cells.append(Cell(cell_centre.tolist(), Cell.UNKNOWN))
             else:
-                if cell_volume < self.max_cluster_size:
+                if cell_volume < self.settings.max_cluster_size:
                     needs_split.append((cell_id, cell_points))
                 else:
                     cell_centre = get_structure_centre(cell_points)
@@ -275,7 +241,7 @@ class VolumeFilter(object):
 
         # we are not returning Cell instances from func because it'd be pickled
         # by multiprocess which slows it down
-        func = partial(_split_cells, outlier_keep=self.outlier_keep)
+        func = partial(_split_cells, outlier_keep=self.settings.outlier_keep)
         for cell_centres in worker_pool.imap_unordered(func, needs_split):
             for cell_centre in cell_centres:
                 cells.append(Cell(cell_centre.tolist(), Cell.UNKNOWN))

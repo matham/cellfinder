@@ -5,6 +5,7 @@ import torch
 
 from cellfinder.core.detect.filters.plane.classical_filter import PeakEnchancer
 from cellfinder.core.detect.filters.plane.tile_walker import TileWalker
+from cellfinder.core.detect.filters.setup_filters import DetectionSettings
 
 
 @dataclass
@@ -21,27 +22,29 @@ class TileProcessor:
 
     clipping_value: int
     threshold_value: int
-    soma_diameter: int
-    log_sigma_size: float
     n_sds_above_mean_thresh: float
-    torch_dtype: torch.dtype
-    torch_device: str
-    plane_shape: Tuple[int, int]
 
     peak_enhancer: PeakEnchancer = field(init=False)
     tile_walker: TileWalker = field(init=False)
 
-    def __post_init__(self):
-        laplace_gaussian_sigma = self.log_sigma_size * self.soma_diameter
+    def __init__(self, settings: DetectionSettings):
+        self.clipping_value = settings.clipping_value
+        self.threshold_value = settings.threshold_value
+        self.n_sds_above_mean_thresh = settings.n_sds_above_mean_thresh
+
+        laplace_gaussian_sigma = (
+            settings.log_sigma_size * settings.soma_diameter
+        )
         self.peak_enhancer = PeakEnchancer(
-            device=self.torch_device,
-            dtype=self.torch_dtype,
+            device=settings.torch_device,
+            dtype=settings.torch_dtype,
             clipping_value=self.clipping_value,
             laplace_gaussian_sigma=laplace_gaussian_sigma,
         )
+
         self.tile_walker = TileWalker(
-            plane_shape=self.plane_shape,
-            soma_diameter=self.soma_diameter,
+            plane_shape=settings.plane_shape,
+            soma_diameter=settings.soma_diameter,
         )
 
     def get_tile_mask(
