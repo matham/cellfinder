@@ -37,7 +37,7 @@ class TileProcessor:
         )
         self.peak_enhancer = PeakEnchancer(
             device=settings.torch_device,
-            dtype=settings.torch_dtype,
+            dtype=getattr(torch, settings.plane_working_dtype),
             clipping_value=self.clipping_value,
             laplace_gaussian_sigma=laplace_gaussian_sigma,
         )

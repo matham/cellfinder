@@ -92,7 +92,9 @@ class BallFilter:
         self.kernel_z_size = self.ball_z_size
 
         kernel = (
-            torch.from_numpy(kernel).type(settings.torch_dtype).pin_memory()
+            torch.from_numpy(kernel)
+            .type(getattr(torch, settings.plane_working_dtype))
+            .pin_memory()
         )
         self.kernel = (
             kernel.unsqueeze(0)
@@ -111,7 +113,7 @@ class BallFilter:
 
         self.volume = torch.empty(
             (0, settings.plane_dim1, settings.plane_dim2),
-            dtype=settings.torch_dtype,
+            dtype=getattr(torch, settings.plane_working_dtype),
         )
         # Index of the middle plane in the volume
         self.middle_z_idx = int(np.floor(self.ball_z_size / 2))

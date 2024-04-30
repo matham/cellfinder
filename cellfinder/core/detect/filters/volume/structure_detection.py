@@ -97,6 +97,7 @@ list_of_points_type = types.ListType(tuple_point_type)
 spec = [
     ("z", vol_numba_type),
     ("next_structure_id", sid_numba_type),
+    ("soma_centre_value", types.int64),
     ("shape", types.UniTuple(vol_numba_type, 2)),
     ("obsolete_ids", DictType(sid_numba_type, sid_numba_type)),
     ("coords_maps", DictType(sid_numba_type, list_of_points_type)),
@@ -133,7 +134,9 @@ class CellDetector:
         points.
     """
 
-    def __init__(self, width: int, height: int, start_z: int):
+    def __init__(
+        self, width: int, height: int, start_z: int, soma_centre_value: int
+    ):
         """
         Parameters
         ----------
@@ -145,6 +148,7 @@ class CellDetector:
         self.shape = width, height
         self.z = start_z
         self.next_structure_id = 1
+        self.soma_centre_value = soma_centre_value
 
         # Mapping from obsolete IDs to the IDs that they have been
         # made obsolete by
@@ -187,10 +191,10 @@ class CellDetector:
             Plane with pixels either set to zero (no structure) or labelled
             with their structure ID.
         """
-        SOMA_CENTRE_VALUE = np.iinfo(plane.dtype).max
+        soma_centre_value = self.soma_centre_value
         for y in range(plane.shape[1]):
             for x in range(plane.shape[0]):
-                if plane[x, y] == SOMA_CENTRE_VALUE:
+                if plane[x, y] == soma_centre_value:
                     # Labels of structures below, left and behind
                     neighbour_ids = np.zeros(3, dtype=sid_np_type)
                     # If in bounds look at neighbours

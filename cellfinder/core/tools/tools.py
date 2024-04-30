@@ -1,22 +1,65 @@
 from random import getrandbits, uniform
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 from natsort import natsorted
 
 
-def get_max_possible_value(obj_in: np.ndarray, dtype=None) -> int:
+def get_max_possible_int_value(dtype) -> int:
     """
     Returns the maximum allowed value for a numpy array of integer data type.
     """
-    if dtype is None:
-        dtype = obj_in.dtype
     if np.issubdtype(dtype, np.integer):
         return np.iinfo(dtype).max
-    elif np.float32 == dtype:
-        return 2**24 - 1
-    else:
-        raise ValueError("obj_in must be a numpy array of integer data type.")
+    if np.issubdtype(dtype, np.floating):
+        mant = np.finfo(dtype).nmant
+        return 2**mant
+    raise ValueError("datatype must be of integer or floating data type")
+
+
+def get_data_converter(
+    src_dtype: np.dtype, dest_dtype: np.dtype, scale_down: bool = True
+) -> Callable[[np.ndarray], np.ndarray]:
+    if not np.issubdtype(dest_dtype, np.floating):
+        raise ValueError(
+            f"Destination dtype must be a floating type, but is {dest_dtype}"
+        )
+
+    in_max = get_max_possible_int_value(src_dtype)
+    out_max = get_max_possible_int_value(dest_dtype)
+
+    def unchanged(data: np.ndarray) -> np.ndarray:
+        return np.asarray(data)
+
+    def float_to_float_scale_down(data: np.ndarray) -> np.ndarray:
+        return ((np.asarray(data) / in_max) * out_max).astype(dest_dtype)
+
+    def int_to_float_scale_down(data: np.ndarray) -> np.ndarray:
+        # data must fit in float64
+        data = np.asarray(data).astype(np.float64)
+        return ((data / in_max) * out_max).astype(dest_dtype)
+
+    def to_float_unscaled(data: np.ndarray) -> np.ndarray:
+        return np.asarray(data).astype(dest_dtype)
+
+    if src_dtype == dest_dtype:
+        return unchanged
+
+    # need to scale down before converting to float
+    if in_max > out_max:
+        if np.issubdtype(src_dtype, np.integer):
+            # int must fit in 64-bit float so we can temp store it there
+            if in_max > get_max_possible_int_value(np.float64):
+                raise ValueError(
+                    f"The input datatype {src_dtype} cannot fit in a "
+                    f"64-bit float"
+                )
+            return int_to_float_scale_down
+
+        return float_to_float_scale_down
+
+    # it can hold the largest value, just convert to float
+    return to_float_unscaled
 
 
 def union(a, b):

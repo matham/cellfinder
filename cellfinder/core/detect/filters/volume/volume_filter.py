@@ -30,17 +30,18 @@ class VolumeFilter(object):
     def __init__(self, settings: DetectionSettings):
         self.settings = settings
 
-        # todo: first z should account for middle plane not being start plane
-        self.z = settings.start_plane
-
         self.previous_plane: Optional[np.ndarray] = None
 
         self.ball_filter = BallFilter(settings=settings)
 
+        # todo: first z should account for middle plane not being start plane
+        self.z = settings.start_plane + self.ball_filter.first_valid_plane
+
         self.cell_detector = CellDetector(
             width=settings.plane_dim1,
             height=settings.plane_dim2,
-            start_z=settings.start_plane + self.ball_filter.first_valid_plane,
+            start_z=self.z,
+            soma_centre_value=settings.soma_centre_value,
         )
 
     def feed_signal_batches(
@@ -54,6 +55,8 @@ class VolumeFilter(object):
                 batch_size = self.settings.batch_size
                 plane_shape = self.settings.plane_shape
                 start_plane = self.settings.start_plane
+                data_converter = self.settings.data_converter_func
+                torch_dtype = getattr(torch, self.settings.plane_working_dtype)
 
                 for _ in range(self.settings.num_prefetch_batches):
                     incoming_tensors.put(
@@ -61,21 +64,18 @@ class VolumeFilter(object):
                             "tensor",
                             torch.empty(
                                 (batch_size, *plane_shape),
-                                dtype=torch.float32,
+                                dtype=torch_dtype,
                                 pin_memory=True,
                             ),
                         )
                     )
 
-                for z in range(0, self.settings.n_planes, batch_size):
-                    np_data = np.asarray(
-                        data[
-                            start_plane + z : start_plane + z + batch_size,
-                            :,
-                            :,
-                        ],
-                        dtype=np.float32,
-                    )
+                for z in range(
+                    start_plane,
+                    start_plane + self.settings.n_planes,
+                    batch_size,
+                ):
+                    np_data = data_converter(data[z : z + batch_size, :, :])
                     if not np_data.shape[0]:
                         return
 
@@ -88,6 +88,14 @@ class VolumeFilter(object):
                     tensor[: np_data.shape[0], :, :] = torch.from_numpy(
                         np_data
                     )
+
+                    if np_data.shape[0] < batch_size:
+                        outgoing_tensors.put(
+                            ("tensor", tensor[: np_data.shape[0], :, :])
+                        )
+                        # we're done
+                        return
+
                     outgoing_tensors.put(("tensor", tensor))
             except Exception as e:
                 outgoing_tensors.put(("exception", e))

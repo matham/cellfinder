@@ -1,11 +1,14 @@
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from functools import cached_property
+from typing import Callable, Optional, Tuple
 
 import numpy as np
-import torch
 from brainglobe_utils.general.system import get_num_processes
 
-from cellfinder.core.tools.tools import get_max_possible_value
+from cellfinder.core.tools.tools import (
+    get_data_converter,
+    get_max_possible_int_value,
+)
 
 
 @dataclass
@@ -35,7 +38,8 @@ class DetectionSettings:
     """
 
     plane_shape: Tuple[int, int]
-    plane_np_dtype: np.dtype
+    plane_original_np_dtype: np.dtype
+    plane_working_dtype: str
 
     voxel_sizes: Tuple[float, float, float]
     soma_spread_factor: float
@@ -65,40 +69,53 @@ class DetectionSettings:
     plane_directory: Optional[str] = None
 
     batch_size: int = 4
-    torch_dtype: Optional[torch.dtype] = None
     torch_device: str = "cpu"
 
     num_prefetch_batches: int = 2
 
-    @property
+    @cached_property
+    def data_converter_func(self) -> Callable[[np.ndarray], np.ndarray]:
+        return get_data_converter(
+            self.plane_original_np_dtype, getattr(np, self.plane_working_dtype)
+        )
+
+    @cached_property
     def clipping_value(self) -> int:
-        return get_max_possible_value(None, self.plane_np_dtype) - 2
+        return (
+            get_max_possible_int_value(getattr(np, self.plane_working_dtype))
+            - 2
+        )
 
-    @property
+    @cached_property
     def threshold_value(self) -> int:
-        return get_max_possible_value(None, self.plane_np_dtype) - 1
+        return (
+            get_max_possible_int_value(getattr(np, self.plane_working_dtype))
+            - 1
+        )
 
-    @property
+    @cached_property
     def soma_centre_value(self) -> int:
-        return get_max_possible_value(None, self.plane_np_dtype)
+        return get_max_possible_int_value(
+            getattr(np, self.plane_working_dtype)
+        )
 
-    @property
+    @cached_property
     def tile_dim1(self) -> int:
         return self.soma_diameter * 2
 
-    @property
+    @cached_property
     def tile_dim2(self) -> int:
         return self.soma_diameter * 2
 
-    @property
+    @cached_property
     def plane_dim1(self) -> int:
         return self.plane_shape[0]
 
-    @property
+    @cached_property
     def plane_dim2(self) -> int:
         return self.plane_shape[1]
 
-    @property
+    @cached_property
     def n_processes(self) -> int:
         n = get_num_processes(min_free_cpu_cores=self.n_free_cpus)
         return max(n - 1, 1)
@@ -117,7 +134,7 @@ def setup_tile_filtering(plane: np.ndarray) -> Tuple[int, int]:
     threshold_value :
         Value used to mark bright pixels after 2D filtering.
     """
-    max_value = get_max_possible_value(plane)
+    max_value = get_max_possible_int_value(plane)
     clipping_value = max_value - 2
     thrsh_val = max_value - 1
 
