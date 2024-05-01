@@ -175,11 +175,6 @@ def main(
         ball_z_size,
     )
 
-    if batch_size < ball_z_size_px:
-        raise ValueError(
-            f"batch_size={batch_size} < ball_z_size (kernel)={ball_z_size_px}"
-        )
-
     if end_plane == -1:
         end_plane = len(signal_array)
     n_planes = max(min(len(signal_array), end_plane) - start_plane, 0)

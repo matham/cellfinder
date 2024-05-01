@@ -102,15 +102,11 @@ class BallFilter:
             .to(device=settings.torch_device, non_blocking=True)
         )
 
+        self.num_batches_before_ready = int(
+            math.ceil(self.ball_z_size / settings.batch_size)
+        )
         # Stores the current planes that are being filtered
         # first axis is z for faster rotating the z-axis
-        if settings.batch_size < self.ball_z_size:
-            raise ValueError(
-                f"batch_size={settings.batch_size} < "
-                f"ball_z_size (kernel)={self.ball_z_size}"
-            )
-        self.num_batches_before_ready = 1
-
         self.volume = torch.empty(
             (0, settings.plane_dim1, settings.plane_dim2),
             dtype=getattr(torch, settings.plane_working_dtype),
@@ -155,8 +151,12 @@ class BallFilter:
         Add a new 2D plane to the filter.
         """
         if self.volume.shape[0]:
-            num_remaining = self.kernel_z_size - (self.middle_z_idx + 1)
-            num_remaining_with_padding = num_remaining + self.middle_z_idx
+            if self.volume.shape[0] < self.kernel_z_size:
+                num_remaining_with_padding = 0
+            else:
+                num_remaining = self.kernel_z_size - (self.middle_z_idx + 1)
+                num_remaining_with_padding = num_remaining + self.middle_z_idx
+
             self.volume = torch.cat(
                 [self.volume[-num_remaining_with_padding:, :, :], planes],
                 dim=0,

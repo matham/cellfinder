@@ -51,6 +51,10 @@ class VolumeFilter(object):
             start_z=self.z,
             soma_centre_value=settings.soma_centre_value,
         )
+        self.n_queue_buffer = max(
+            self.settings.num_prefetch_batches,
+            self.ball_filter.num_batches_before_ready,
+        )
 
     @inference_wrapper
     def _feed_signal_batches(self, data: types.array) -> None:
@@ -64,7 +68,7 @@ class VolumeFilter(object):
         thread = self.data_feed_thread
 
         # create pinned tensors ahead of time for faster copying to gpu
-        for _ in range(self.settings.num_prefetch_batches):
+        for _ in range(self.n_queue_buffer):
             empty = torch.empty(
                 (batch_size, *plane_shape), dtype=torch_dtype, pin_memory=True
             )
@@ -151,7 +155,7 @@ class VolumeFilter(object):
         detector = self.cell_detector
 
         # main thread needs a token to send us planes - populate with some
-        for _ in range(self.settings.num_prefetch_batches):
+        for _ in range(self.n_queue_buffer):
             thread.send_msg_to_mainthread(object())
 
         while True:
