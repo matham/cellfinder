@@ -1,9 +1,7 @@
 import math
 import multiprocessing.pool
 import os
-from functools import partial
-from queue import Queue
-from threading import Thread
+from functools import partial, wraps
 from typing import Callable, List, Optional
 
 import numpy as np
@@ -24,6 +22,16 @@ from cellfinder.core.detect.filters.volume.structure_splitting import (
     StructureSplitException,
     split_cells,
 )
+from cellfinder.core.tools.threading import EOFSignal, ThreadWithException
+
+
+def inference_wrapper(func):
+    @wraps(func)
+    def inner_function(*args, **kwargs):
+        with torch.inference_mode(True):
+            return func(*args, **kwargs)
+
+    return inner_function
 
 
 class VolumeFilter(object):
@@ -44,63 +52,41 @@ class VolumeFilter(object):
             soma_centre_value=settings.soma_centre_value,
         )
 
-    def feed_signal_batches(
-        self,
-        incoming_tensors: Queue,
-        outgoing_tensors: Queue,
-        data: types.array,
-    ) -> None:
-        with torch.inference_mode(True):
-            try:
-                batch_size = self.settings.batch_size
-                plane_shape = self.settings.plane_shape
-                start_plane = self.settings.start_plane
-                data_converter = self.settings.data_converter_func
-                torch_dtype = getattr(torch, self.settings.plane_working_dtype)
+    @inference_wrapper
+    def _feed_signal_batches(self, data: types.array) -> None:
+        batch_size = self.settings.batch_size
+        plane_shape = self.settings.plane_shape
+        start_plane = self.settings.start_plane
+        end_plane = start_plane + self.settings.n_planes
+        data_converter = self.settings.data_converter_func
+        torch_dtype = getattr(torch, self.settings.plane_working_dtype)
 
-                for _ in range(self.settings.num_prefetch_batches):
-                    incoming_tensors.put(
-                        (
-                            "tensor",
-                            torch.empty(
-                                (batch_size, *plane_shape),
-                                dtype=torch_dtype,
-                                pin_memory=True,
-                            ),
-                        )
-                    )
+        thread = self.data_feed_thread
 
-                for z in range(
-                    start_plane,
-                    start_plane + self.settings.n_planes,
-                    batch_size,
-                ):
-                    np_data = data_converter(data[z : z + batch_size, :, :])
-                    if not np_data.shape[0]:
-                        return
+        # create pinned tensors ahead of time for faster copying to gpu
+        for _ in range(self.settings.num_prefetch_batches):
+            empty = torch.empty(
+                (batch_size, *plane_shape), dtype=torch_dtype, pin_memory=True
+            )
+            thread.send_msg_to_thread(empty)
 
-                    msg, tensor = incoming_tensors.get(
-                        block=True, timeout=None
-                    )
-                    if msg == "eof":
-                        return
+        for z in range(start_plane, end_plane, batch_size):
+            np_data = data_converter(data[z : z + batch_size, :, :])
+            n = np_data.shape[0]
+            if not n:
+                return
 
-                    tensor[: np_data.shape[0], :, :] = torch.from_numpy(
-                        np_data
-                    )
+            tensor = thread.get_msg_from_mainthread()
+            if tensor is EOFSignal:
+                return
 
-                    if np_data.shape[0] < batch_size:
-                        outgoing_tensors.put(
-                            ("tensor", tensor[: np_data.shape[0], :, :])
-                        )
-                        # we're done
-                        return
+            tensor[:n, :, :] = torch.from_numpy(np_data)
 
-                    outgoing_tensors.put(("tensor", tensor))
-            except Exception as e:
-                outgoing_tensors.put(("exception", e))
-            finally:
-                outgoing_tensors.put(("eof", None))
+            if n < batch_size:
+                thread.send_msg_to_mainthread(tensor[:n, :, :])
+                # we're done
+                return
+            thread.send_msg_to_mainthread(tensor)
 
     def process(
         self,
@@ -113,29 +99,23 @@ class VolumeFilter(object):
             total=self.settings.n_planes, desc="Processing planes"
         )
 
-        data_queue_in = Queue(maxsize=0)
-        data_queue_back = Queue(maxsize=0)
-        data_thread = Thread(
-            target=self.feed_signal_batches,
-            args=(data_queue_back, data_queue_in, signal_array),
+        feed_thread = ThreadWithException(
+            target=self._feed_signal_batches, args=(signal_array,)
         )
-        data_thread.start()
+        self.data_feed_thread = feed_thread
+        feed_thread.start()
 
-        filter_queue = Queue(maxsize=self.settings.num_prefetch_batches)
-        filter_thread = Thread(
-            target=self._run_filter_thread,
-            args=(filter_queue, callback, progress_bar),
+        cells_thread = ThreadWithException(
+            target=self._run_filter_thread, args=(callback, progress_bar)
         )
-        filter_thread.start()
+        self.cells_thread = cells_thread
+        cells_thread.start()
 
         try:
             while True:
-                msg, value = data_queue_in.get(block=True, timeout=None)
-                if msg == "eof":
+                tensor = feed_thread.get_msg_from_thread()
+                if tensor is EOFSignal:
                     break
-                if msg == "exception":
-                    raise Exception("Processing signal data failed") from value
-                tensor = value
 
                 tensor = tensor.to(
                     device=self.settings.torch_device, non_blocking=True
@@ -148,59 +128,59 @@ class VolumeFilter(object):
 
                     # at this point we know input tensor can be reused - return
                     # it
-                    data_queue_back.put(("tensor", tensor))
-                    filter_queue.put(
-                        ("tensor", middle_planes), block=True, timeout=None
-                    )
+                    feed_thread.send_msg_to_thread(tensor)
+
+                    token = cells_thread.get_msg_from_thread()
+                    if token is EOFSignal:
+                        break
+                    cells_thread.send_msg_to_thread((middle_planes, token))
 
         finally:
-            data_queue_back.put(("eof", None))
-            filter_queue.put(("eof", None))
+            feed_thread.notify_to_end_thread()
+            cells_thread.notify_to_end_thread()
 
-        data_thread.join()
-        filter_thread.join()
+        feed_thread.join()
+        cells_thread.join()
+
         progress_bar.close()
         logger.debug("3D filter done")
-        # np.save("/home/matte/times2.npy", np.asarray(self.times))
-        # raise ValueError
 
-    def _run_filter_thread(
-        self, incoming_tensors: Queue, callback, progress_bar
-    ) -> None:
-        with torch.inference_mode(True):
-            while True:
-                msg, middle_planes = incoming_tensors.get(
-                    block=True, timeout=None
-                )
-                if msg == "eof":
-                    return
+    @inference_wrapper
+    def _run_filter_thread(self, callback, progress_bar) -> None:
+        thread = self.cells_thread
+        detector = self.cell_detector
 
-                middle_planes = middle_planes.astype(np.uint32)
-                middle_planes[middle_planes >= 2**24 - 2] = np.iinfo(
-                    np.uint32
-                ).max
+        # main thread needs a token to send us planes - populate with some
+        for _ in range(self.settings.num_prefetch_batches):
+            thread.send_msg_to_mainthread(object())
 
-                logger.debug(f"🏐 Ball filtering plane {self.z}")
-                # filtering original images, the images should be large enough
-                # in x/y to benefit from parallelization. Note: don't pass arg
-                # as keyword arg because numba gets stuck (probably b/c class
-                # jit is new)
-                if self.settings.save_planes:
-                    for plane in middle_planes:
-                        self.save_plane(plane)
+        while True:
+            msg = thread.get_msg_from_mainthread()
+            if msg is EOFSignal:
+                return
 
-                logger.debug(f"🏫 Detecting structures for plane {self.z}")
+            middle_planes, token = msg
+            middle_planes = middle_planes.astype(np.uint32)
+            middle_planes[middle_planes >= 2**24 - 2] = np.iinfo(np.uint32).max
+
+            logger.debug(f"🏐 Ball filtering plane {self.z}")
+            if self.settings.save_planes:
                 for plane in middle_planes:
-                    self.previous_plane = self.cell_detector.process(
-                        plane, self.previous_plane
-                    )
+                    self.save_plane(plane)
 
-                    if callback is not None:
-                        callback(self.z)
-                    self.z += 1
-                    progress_bar.update()
+            logger.debug(f"🏫 Detecting structures for plane {self.z}")
+            for plane in middle_planes:
+                self.previous_plane = detector.process(
+                    plane, self.previous_plane
+                )
 
-                logger.debug(f"🏫 Structures done for plane {self.z}")
+                if callback is not None:
+                    callback(self.z)
+                self.z += 1
+                progress_bar.update()
+
+            thread.send_msg_to_mainthread(token)
+            logger.debug(f"🏫 Structures done for plane {self.z}")
 
     def save_plane(self, plane: np.ndarray) -> None:
         if self.settings.plane_directory is None:
