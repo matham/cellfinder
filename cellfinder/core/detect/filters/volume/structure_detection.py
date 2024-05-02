@@ -97,7 +97,7 @@ list_of_points_type = types.ListType(tuple_point_type)
 spec = [
     ("z", vol_numba_type),
     ("next_structure_id", sid_numba_type),
-    ("soma_centre_value", types.int64),
+    ("soma_centre_value", types.uint64),  # as large as possible
     ("shape", types.UniTuple(vol_numba_type, 2)),
     ("obsolete_ids", DictType(sid_numba_type, sid_numba_type)),
     ("coords_maps", DictType(sid_numba_type, list_of_points_type)),
