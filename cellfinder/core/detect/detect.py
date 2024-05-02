@@ -180,12 +180,12 @@ def main(
     n_planes = max(min(len(signal_array), end_plane) - start_plane, 0)
 
     # pytorch requires floats for many operations
-    plane_working_dtype = "float32"
+    filterting_dtype = "float32"
 
     settings = DetectionSettings(
         plane_shape=signal_array.shape[1:],
         plane_original_np_dtype=signal_array.dtype,
-        plane_working_dtype=plane_working_dtype,
+        filterting_dtype=filterting_dtype,
         voxel_sizes=voxel_sizes,
         soma_spread_factor=soma_spread_factor,
         soma_diameter=soma_diameter_px,

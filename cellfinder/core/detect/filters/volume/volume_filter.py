@@ -62,8 +62,8 @@ class VolumeFilter(object):
         plane_shape = self.settings.plane_shape
         start_plane = self.settings.start_plane
         end_plane = start_plane + self.settings.n_planes
-        data_converter = self.settings.data_converter_func
-        torch_dtype = getattr(torch, self.settings.plane_working_dtype)
+        data_converter = self.settings.filter_data_converter_func
+        torch_dtype = getattr(torch, self.settings.filterting_dtype)
 
         thread = self.data_feed_thread
 
@@ -153,6 +153,7 @@ class VolumeFilter(object):
     def _run_filter_thread(self, callback, progress_bar) -> None:
         thread = self.cells_thread
         detector = self.cell_detector
+        detection_dtype = self.settings.detection_dtype
 
         # main thread needs a token to send us planes - populate with some
         for _ in range(self.n_queue_buffer):
@@ -164,8 +165,7 @@ class VolumeFilter(object):
                 return
 
             middle_planes, token = msg
-            middle_planes = middle_planes.astype(np.uint32)
-            middle_planes[middle_planes >= 2**24 - 2] = np.iinfo(np.uint32).max
+            middle_planes = middle_planes.astype(detection_dtype)
 
             logger.debug(f"🏐 Ball filtering plane {self.z}")
             if self.settings.save_planes:

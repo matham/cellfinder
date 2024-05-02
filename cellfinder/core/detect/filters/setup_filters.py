@@ -35,11 +35,14 @@ class DetectionSettings:
         a high intensity.
     soma_centre_value :
         Value used to mark pixels with a high enough intensity.
+
+
+    n_iter (int): The number of iterations to perform. Default is 10.
     """
 
     plane_shape: Tuple[int, int]
     plane_original_np_dtype: np.dtype
-    plane_working_dtype: str
+    filterting_dtype: str
 
     voxel_sizes: Tuple[float, float, float]
     soma_spread_factor: float
@@ -73,31 +76,41 @@ class DetectionSettings:
 
     num_prefetch_batches: int = 2
 
+    n_splitting_iter: int = 10
+
     @cached_property
-    def data_converter_func(self) -> Callable[[np.ndarray], np.ndarray]:
+    def filter_data_converter_func(self) -> Callable[[np.ndarray], np.ndarray]:
         return get_data_converter(
-            self.plane_original_np_dtype, getattr(np, self.plane_working_dtype)
+            self.plane_original_np_dtype, getattr(np, self.filterting_dtype)
         )
+
+    @cached_property
+    def detection_dtype(self) -> np.dtype:
+        working_dtype = getattr(np, self.filterting_dtype)
+        if np.issubdtype(working_dtype, np.integer):
+            # already integer, return it
+            return working_dtype
+
+        max_int = get_max_possible_int_value(working_dtype)
+        if max_int <= get_max_possible_int_value(np.uint32):
+            return np.uint32
+        return np.uint64
 
     @cached_property
     def clipping_value(self) -> int:
         return (
-            get_max_possible_int_value(getattr(np, self.plane_working_dtype))
-            - 2
+            get_max_possible_int_value(getattr(np, self.filterting_dtype)) - 2
         )
 
     @cached_property
     def threshold_value(self) -> int:
         return (
-            get_max_possible_int_value(getattr(np, self.plane_working_dtype))
-            - 1
+            get_max_possible_int_value(getattr(np, self.filterting_dtype)) - 1
         )
 
     @cached_property
     def soma_centre_value(self) -> int:
-        return get_max_possible_int_value(
-            getattr(np, self.plane_working_dtype)
-        )
+        return get_max_possible_int_value(getattr(np, self.filterting_dtype))
 
     @cached_property
     def tile_dim1(self) -> int:
