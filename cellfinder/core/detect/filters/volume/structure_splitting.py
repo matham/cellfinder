@@ -208,6 +208,11 @@ def split_cells(
         dtype=dtype,
         threshold_value=settings.threshold_value,
     )
+    total_vol_size = (
+        settings.plane_dim1 * settings.plane_dim2 * settings.batch_size
+    )
+    batch_size = total_vol_size // (vol.shape[1] * vol.shape[2])
+    batch_size = min(batch_size, vol.shape[0])
 
     settings.ball_z_size = 3
     settings.ball_xy_size = 3
@@ -221,6 +226,8 @@ def split_cells(
     settings.n_planes = settings.end_plane
     settings.tile_dim1 = settings.plane_shape[0]
     settings.tile_dim2 = settings.plane_shape[1]
+    settings.batch_size = batch_size
+    settings.torch_device = "cpu"
 
     # centres is a list of arrays of centres (1 array of centres per ball run)
     ns, centres = iterative_ball_filter(vol, settings)
