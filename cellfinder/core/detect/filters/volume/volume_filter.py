@@ -233,7 +233,7 @@ class VolumeFilter(object):
 
         # we are not returning Cell instances from func because it'd be pickled
         # by multiprocess which slows it down
-        func = partial(_split_cells, outlier_keep=self.settings.outlier_keep)
+        func = partial(_split_cells, settings=self.settings)
         for cell_centres in worker_pool.imap_unordered(func, needs_split):
             for cell_centre in cell_centres:
                 cells.append(Cell(cell_centre.tolist(), Cell.UNKNOWN))
@@ -247,10 +247,12 @@ class VolumeFilter(object):
         return cells
 
 
-def _split_cells(arg, outlier_keep):
+@inference_wrapper
+def _split_cells(arg, settings: DetectionSettings):
+    torch.set_num_threads(1)
     cell_id, cell_points = arg
     try:
-        return split_cells(cell_points, outlier_keep=outlier_keep)
+        return split_cells(cell_points, settings=settings)
     except (ValueError, AssertionError) as err:
         raise StructureSplitException(f"Cell {cell_id}, error; {err}")
 
