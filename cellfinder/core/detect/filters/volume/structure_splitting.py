@@ -92,8 +92,8 @@ def ball_filter_imgs(
     previous_plane = None
     for z in range(0, volume.shape[0], batch_size):
         item = volume[z : z + batch_size, :, :]
-
         bf.append(item, good_tiles_mask[z : z + batch_size, :, :])
+
         if bf.ready:
             bf.walk()
             middle_planes = bf.get_middle_planes()

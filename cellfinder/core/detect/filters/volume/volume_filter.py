@@ -1,6 +1,8 @@
+import dataclasses
 import math
+import multiprocessing as mp
 import os
-from functools import wraps
+from functools import partial, wraps
 from typing import Callable, List, Optional
 
 import numpy as np
@@ -197,8 +199,9 @@ class VolumeFilter(object):
     def get_results(self) -> List[Cell]:
         logger.info("Splitting cell clusters and writing results")
 
+        settings = self.settings
         max_cell_volume = sphere_volume(
-            self.settings.soma_spread_factor * self.settings.soma_diameter / 2
+            settings.soma_spread_factor * settings.soma_diameter / 2
         )
 
         cells = []
@@ -214,7 +217,7 @@ class VolumeFilter(object):
                 cell_centre = get_structure_centre(cell_points)
                 cells.append(Cell(cell_centre.tolist(), Cell.UNKNOWN))
             else:
-                if cell_volume < self.settings.max_cluster_size:
+                if cell_volume < settings.max_cluster_size:
                     needs_split.append((cell_id, cell_points))
                 else:
                     cell_centre = get_structure_centre(cell_points)
@@ -230,15 +233,13 @@ class VolumeFilter(object):
             total=len(needs_split), desc="Splitting cell clusters"
         )
 
-        for cell_id, cell_points in needs_split:
-            try:
-                cell_centres = split_cells(cell_points, settings=self.settings)
-            except (ValueError, AssertionError) as err:
-                raise StructureSplitException(f"Cell {cell_id}, error; {err}")
-
-            for cell_centre in cell_centres:
-                cells.append(Cell(cell_centre.tolist(), Cell.UNKNOWN))
-            progress_bar.update()
+        f = partial(_split_cells, settings_dict=dataclasses.asdict(settings))
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=settings.n_processes) as pool:
+            for cell_centres in pool.imap_unordered(f, needs_split):
+                for cell_centre in cell_centres:
+                    cells.append(Cell(cell_centre.tolist(), Cell.UNKNOWN))
+                progress_bar.update()
 
         progress_bar.close()
         logger.debug(
@@ -249,12 +250,13 @@ class VolumeFilter(object):
 
 
 @inference_wrapper
-def _split_cells(arg, settings: DetectionSettings):
-    settings = DetectionSettings(**settings)
+def _split_cells(arg, settings_dict: dict):
     torch.set_num_threads(1)
     cell_id, cell_points = arg
     try:
-        return split_cells(cell_points, settings=settings)
+        return split_cells(
+            cell_points, settings=DetectionSettings(**settings_dict)
+        )
     except (ValueError, AssertionError) as err:
         raise StructureSplitException(f"Cell {cell_id}, error; {err}")
 
