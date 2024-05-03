@@ -74,7 +74,7 @@ def ball_filter_imgs(
     """
     # OPTIMISE: reuse ball filter instance
 
-    good_tiles_mask = torch.ones((volume.shape[2], 1, 1), dtype=torch.bool)
+    good_tiles_mask = torch.ones((volume.shape[0], 1, 1), dtype=torch.bool)
 
     plane_width, plane_height = volume.shape[1:]
     detection_dtype = settings.detection_dtype
