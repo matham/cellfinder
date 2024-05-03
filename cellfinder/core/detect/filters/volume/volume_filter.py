@@ -1,7 +1,6 @@
 import math
-import multiprocessing.pool
 import os
-from functools import partial, wraps
+from functools import wraps
 from typing import Callable, List, Optional
 
 import numpy as np
@@ -195,7 +194,7 @@ class VolumeFilter(object):
         f_path = os.path.join(self.settings.plane_directory, plane_name)
         tifffile.imsave(f_path, plane.T)
 
-    def get_results(self, worker_pool: multiprocessing.Pool) -> List[Cell]:
+    def get_results(self) -> List[Cell]:
         logger.info("Splitting cell clusters and writing results")
 
         max_cell_volume = sphere_volume(
@@ -231,10 +230,12 @@ class VolumeFilter(object):
             total=len(needs_split), desc="Splitting cell clusters"
         )
 
-        # we are not returning Cell instances from func because it'd be pickled
-        # by multiprocess which slows it down
-        func = partial(_split_cells, settings=self.settings)
-        for cell_centres in worker_pool.imap_unordered(func, needs_split):
+        for cell_id, cell_points in needs_split:
+            try:
+                cell_centres = split_cells(cell_points, settings=self.settings)
+            except (ValueError, AssertionError) as err:
+                raise StructureSplitException(f"Cell {cell_id}, error; {err}")
+
             for cell_centre in cell_centres:
                 cells.append(Cell(cell_centre.tolist(), Cell.UNKNOWN))
             progress_bar.update()
@@ -249,6 +250,7 @@ class VolumeFilter(object):
 
 @inference_wrapper
 def _split_cells(arg, settings: DetectionSettings):
+    settings = DetectionSettings(**settings)
     torch.set_num_threads(1)
     cell_id, cell_points = arg
     try:

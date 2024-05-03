@@ -230,10 +230,7 @@ def main(
             mp_tile_processor, signal_array, callback=callback
         )
 
-        mp_ctx = multiprocessing.get_context("spawn")
-        with mp_ctx.Pool(settings.n_processes) as worker_pool:
-            # it's now done filtering, get results with pool
-            cells = mp_3d_filter.get_results(worker_pool)
+        cells = mp_3d_filter.get_results()
 
     time_elapsed = datetime.now() - start_time
     logger.debug(
