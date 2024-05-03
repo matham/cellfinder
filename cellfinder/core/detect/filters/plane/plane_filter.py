@@ -88,7 +88,7 @@ class TileProcessor:
             enhanced_planes, self.n_sds_above_mean_thresh, self.threshold_value
         )
 
-        return planes, inside_brain_tiles
+        return enhanced_planes, inside_brain_tiles
 
 
 @torch.jit.script
