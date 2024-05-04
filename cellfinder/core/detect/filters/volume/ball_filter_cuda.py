@@ -12,6 +12,10 @@ from cellfinder.core.tools.geometry import make_sphere
 DEBUG = False
 
 
+class InvalidVolume(ValueError):
+    pass
+
+
 @lru_cache(maxsize=50)
 def get_kernel(ball_xy_size: int, ball_z_size: int) -> np.ndarray:
     # Create a spherical kernel.
@@ -81,12 +85,19 @@ class BallFilter:
         self.tile_step_dim1 = settings.tile_dim1
         self.tile_step_dim2 = settings.tile_dim2
 
+        d1 = settings.plane_dim1
+        d2 = settings.plane_dim2
+        ball_xy_size = self.ball_xy_size
+        if d1 < ball_xy_size or d2 < ball_xy_size:
+            raise InvalidVolume(
+                f"Invalid plane size {d1}x{d2}. Needs to be at least "
+                f"{ball_xy_size} in each dimension"
+            )
+
         self.THRESHOLD_VALUE = settings.threshold_value
         self.SOMA_CENTRE_VALUE = settings.soma_centre_value
 
-        kernel = np.moveaxis(
-            get_kernel(self.ball_xy_size, self.ball_z_size), 2, 0
-        )
+        kernel = np.moveaxis(get_kernel(ball_xy_size, self.ball_z_size), 2, 0)
         self.overlap_threshold = np.sum(self.overlap_fraction * kernel)
         self.kernel_xy_size = kernel.shape[-2:]
         self.kernel_z_size = self.ball_z_size
@@ -130,8 +141,8 @@ class BallFilter:
         tile_mask_covered_img_dim1 = tile_dim1 * self.tile_step_dim1
         tile_mask_covered_img_dim2 = tile_dim2 * self.tile_step_dim2
         # Get maximum offsets for the ball within the tiled plane
-        max_dim1 = tile_mask_covered_img_dim1 - self.ball_xy_size
-        max_dim2 = tile_mask_covered_img_dim2 - self.ball_xy_size
+        max_dim1 = tile_mask_covered_img_dim1 - ball_xy_size
+        max_dim2 = tile_mask_covered_img_dim2 - ball_xy_size
         self.tiled_xy = max_dim1, max_dim2
 
     @property

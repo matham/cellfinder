@@ -5,7 +5,10 @@ import torch
 
 from cellfinder.core import logger
 from cellfinder.core.detect.filters.setup_filters import DetectionSettings
-from cellfinder.core.detect.filters.volume.ball_filter_cuda import BallFilter
+from cellfinder.core.detect.filters.volume.ball_filter_cuda import (
+    BallFilter,
+    InvalidVolume,
+)
 from cellfinder.core.detect.filters.volume.structure_detection import (
     CellDetector,
     get_structure_centre,
@@ -80,7 +83,12 @@ def ball_filter_imgs(
     detection_dtype = settings.detection_dtype
     batch_size = settings.batch_size
 
-    bf = BallFilter(settings=settings)
+    # make sure volume is not less than kernel etc
+    try:
+        bf = BallFilter(settings=settings)
+    except InvalidVolume:
+        return np.empty((0, 3))
+
     start_z = bf.first_valid_plane
     cell_detector = CellDetector(
         plane_width,
