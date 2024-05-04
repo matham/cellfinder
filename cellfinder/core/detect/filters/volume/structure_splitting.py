@@ -76,16 +76,13 @@ def ball_filter_imgs(
 
     """
     # OPTIMISE: reuse ball filter instance
-
-    good_tiles_mask = torch.ones((volume.shape[0], 1, 1), dtype=torch.bool)
-
     plane_width, plane_height = volume.shape[1:]
     detection_dtype = settings.detection_dtype
     batch_size = settings.batch_size
 
     # make sure volume is not less than kernel etc
     try:
-        bf = BallFilter(settings=settings)
+        bf = BallFilter(settings=settings, use_mask=False)
     except InvalidVolume:
         return np.empty((0, 3))
 
@@ -99,8 +96,7 @@ def ball_filter_imgs(
 
     previous_plane = None
     for z in range(0, volume.shape[0], batch_size):
-        item = volume[z : z + batch_size, :, :]
-        bf.append(item, good_tiles_mask[z : z + batch_size, :, :])
+        bf.append(volume[z : z + batch_size, :, :])
 
         if bf.ready:
             bf.walk()
@@ -232,8 +228,6 @@ def split_cells(
     settings.start_plane = 0
     settings.end_plane = vol.shape[0]
     settings.n_planes = settings.end_plane
-    settings.tile_dim1 = settings.plane_shape[0]
-    settings.tile_dim2 = settings.plane_shape[1]
     settings.batch_size = batch_size
     settings.torch_device = "cpu"
 

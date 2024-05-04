@@ -128,7 +128,7 @@ class VolumeFilter(object):
                 planes, masks = tile_processor.get_tile_mask(tensor)
                 self.ball_filter.append(planes, masks)
                 if self.ball_filter.ready:
-                    self.ball_filter.walk(True)
+                    self.ball_filter.walk()
                     middle_planes = self.ball_filter.get_middle_planes()
 
                     # at this point we know input tensor can be reused - return

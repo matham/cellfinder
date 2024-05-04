@@ -1,5 +1,6 @@
 import math
 from functools import lru_cache
+from typing import Optional
 
 import numpy as np
 import torch
@@ -72,7 +73,9 @@ class BallFilter:
 
     num_batches_before_ready: int
 
-    def __init__(self, settings: DetectionSettings):
+    inside_brain_tiles: Optional[torch.Tensor] = None
+
+    def __init__(self, settings: DetectionSettings, use_mask: bool = True):
         """
         Parameters
         ----------
@@ -125,6 +128,8 @@ class BallFilter:
         # Index of the middle plane in the volume
         self.middle_z_idx = int(np.floor(self.ball_z_size / 2))
 
+        if not use_mask:
+            return
         # first axis is z
         tile_dim1 = int(np.ceil(settings.plane_dim1 / self.tile_step_dim1))
         tile_dim2 = int(np.ceil(settings.plane_dim2 / self.tile_step_dim2))
@@ -136,14 +141,6 @@ class BallFilter:
             ),
             dtype=torch.bool,
         )
-
-        # Get extents of image that are covered by tiles
-        tile_mask_covered_img_dim1 = tile_dim1 * self.tile_step_dim1
-        tile_mask_covered_img_dim2 = tile_dim2 * self.tile_step_dim2
-        # Get maximum offsets for the ball within the tiled plane
-        max_dim1 = tile_mask_covered_img_dim1 - ball_xy_size
-        max_dim2 = tile_mask_covered_img_dim2 - ball_xy_size
-        self.tiled_xy = max_dim1, max_dim2
 
     @property
     def first_valid_plane(self):
@@ -157,7 +154,9 @@ class BallFilter:
         """
         return self.volume.shape[0] >= self.kernel_z_size
 
-    def append(self, planes: np.ndarray, masks: np.ndarray) -> None:
+    def append(
+        self, planes: np.ndarray, masks: Optional[np.ndarray] = None
+    ) -> None:
         """
         Add a new 2D plane to the filter.
         """
@@ -172,18 +171,21 @@ class BallFilter:
                 [self.volume[-num_remaining_with_padding:, :, :], planes],
                 dim=0,
             )
-            self.inside_brain_tiles = torch.cat(
-                [
-                    self.inside_brain_tiles[
-                        -num_remaining_with_padding:, :, :
+
+            if self.inside_brain_tiles is not None:
+                self.inside_brain_tiles = torch.cat(
+                    [
+                        self.inside_brain_tiles[
+                            -num_remaining_with_padding:, :, :
+                        ],
+                        masks,
                     ],
-                    masks,
-                ],
-                dim=0,
-            )
+                    dim=0,
+                )
         else:
             self.volume = planes.clone()
-            self.inside_brain_tiles = masks.clone()
+            if self.inside_brain_tiles is not None:
+                self.inside_brain_tiles = masks.clone()
 
     def get_middle_planes(self) -> np.ndarray:
         """
@@ -200,55 +202,51 @@ class BallFilter:
         )
         return planes
 
-    def walk(self, parallel: bool = False) -> None:
-        # **don't** pass parallel as keyword arg - numba struggles with it
-        # Highly optimised because most time critical
-        max_dim1, max_dim2 = self.tiled_xy
+    def walk(self) -> None:
         num_process = self.volume.shape[0] - self.kernel_z_size + 1
+        dim1, dim2 = self.volume.shape[1:]
         middle = self.middle_z_idx
 
-        # inside = self.inside_brain_tiles[middle: middle + num_process, :, :]
-        # _, w, h = inside.shape
-        # inside = inside.view(w, 1, h).expand(w,
-        # self.tile_step_dim1, h).contiguous().view(-1, h)
-        # inside = self.inside_brain_tiles[middle : middle + num_process, :, :]
-        # orig_w, orig_h = inside.shape[1:]
-        # final_w = self.tile_step_dim1 * orig_w
-        # inside = (
-        #     inside
-        #     .view(num_process, orig_w, 1, orig_h)
-        #     .expand(num_process, orig_w, self.tile_step_dim1, orig_h)
-        #     .contiguous()
-        #     .view(num_process, -1, orig_h)
-        #     .view(num_process, final_w, orig_h, 1)
-        #     .expand(num_process, final_w, orig_h, self.tile_step_dim2)
-        #     .contiguous()
-        #     .view(num_process, final_w, -1)
-        # )
-        inside = (
-            self.inside_brain_tiles[middle : middle + num_process, :, :]
-            .repeat_interleave(self.tile_step_dim1, dim=1)
-            .repeat_interleave(self.tile_step_dim2, dim=2)
-        )
-        # max_xxx may be larger than actual volume
-        sub_volume = self.volume[:, :max_dim1, :max_dim2]
-        # it may be larger if the last tile sticks outside the volume
-
         volume_tresh = (
-            (sub_volume >= self.THRESHOLD_VALUE)
+            (self.volume >= self.THRESHOLD_VALUE)
             .unsqueeze(0)
             .unsqueeze(0)
             .type(self.kernel.dtype)
         )
-        # pherical kernel is symetric so convolution=corrolation
+        # spherical kernel is symetric so convolution=corrolation
         overlaps = (
             F.conv3d(volume_tresh, self.kernel, stride=1)[0, 0, :, :, :]
             > self.overlap_threshold
         )
-        inside = inside[:, : overlaps.shape[1], : overlaps.shape[2]]
 
-        sub_volume[
+        # get only z's that are processed (e.g. with kernel=3, depth=5,
+        # only 3 planes are processed). Also, only get the volume that is valid
+        # - conv excludes edges
+        dim1_valid, dim2_valid = overlaps.shape[1:]
+        dim1_offset = (dim1 - dim1_valid) // 2
+        dim2_offset = (dim2 - dim2_valid) // 2
+        sub_volume = self.volume[
             middle : middle + num_process,
-            : overlaps.shape[1],
-            : overlaps.shape[2],
-        ][torch.logical_and(overlaps, inside)] = self.SOMA_CENTRE_VALUE
+            dim1_offset : dim1_offset + dim1_valid,
+            dim2_offset : dim2_offset + dim2_valid,
+        ]
+
+        if self.inside_brain_tiles is not None:
+            # unfold tiles to cover the full area each tile covers
+            inside = (
+                self.inside_brain_tiles[middle : middle + num_process, :, :]
+                .repeat_interleave(self.tile_step_dim1, dim=1)
+                .repeat_interleave(self.tile_step_dim2, dim=2)
+            )
+            inside = inside[
+                :,
+                dim1_offset : dim1_offset + dim1_valid,
+                dim2_offset : dim2_offset + dim2_valid,
+            ]
+
+            sub_volume[torch.logical_and(overlaps, inside)] = (
+                self.SOMA_CENTRE_VALUE
+            )
+
+        else:
+            sub_volume[overlaps] = self.SOMA_CENTRE_VALUE

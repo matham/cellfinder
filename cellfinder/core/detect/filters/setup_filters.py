@@ -112,23 +112,23 @@ class DetectionSettings:
     def soma_centre_value(self) -> int:
         return get_max_possible_int_value(getattr(np, self.filterting_dtype))
 
-    @cached_property
+    @property
     def tile_dim1(self) -> int:
         return self.soma_diameter * 2
 
-    @cached_property
+    @property
     def tile_dim2(self) -> int:
         return self.soma_diameter * 2
 
-    @cached_property
+    @property
     def plane_dim1(self) -> int:
         return self.plane_shape[0]
 
-    @cached_property
+    @property
     def plane_dim2(self) -> int:
         return self.plane_shape[1]
 
-    @cached_property
+    @property
     def n_processes(self) -> int:
         n = get_num_processes(min_free_cpu_cores=self.n_free_cpus)
         return max(n - 1, 1)
