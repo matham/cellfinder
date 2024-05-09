@@ -13,7 +13,7 @@ from tqdm import tqdm
 from cellfinder.core import logger, types
 from cellfinder.core.detect.filters.plane import TileProcessor
 from cellfinder.core.detect.filters.setup_filters import DetectionSettings
-from cellfinder.core.detect.filters.volume.ball_filter_cuda import BallFilter
+from cellfinder.core.detect.filters.volume.ball_filter import BallFilter
 from cellfinder.core.detect.filters.volume.structure_detection import (
     CellDetector,
     get_structure_centre,

@@ -5,7 +5,7 @@ import torch
 
 from cellfinder.core import logger
 from cellfinder.core.detect.filters.setup_filters import DetectionSettings
-from cellfinder.core.detect.filters.volume.ball_filter_cuda import (
+from cellfinder.core.detect.filters.volume.ball_filter import (
     BallFilter,
     InvalidVolume,
 )
