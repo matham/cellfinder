@@ -200,12 +200,20 @@ def main(
         dtype=settings.filterting_dtype,
     )
 
+    orig_n_threads = torch.get_num_threads()
+    # as seen in the benchmarks in the original PR, especially when running on
+    # CPU, using more than ~36 cores actually starts to result in slowdowns so
+    # limit to 32 cores.
+    torch.set_num_threads(min(settings.n_processes, 32))
+
     with torch.inference_mode(True):
         # process the data
         mp_3d_filter.process(
             mp_tile_processor, signal_array, callback=callback
         )
         cells = mp_3d_filter.get_results(splitting_settings)
+
+    torch.set_num_threads(orig_n_threads)
 
     time_elapsed = datetime.now() - start_time
     s = f"Detection complete. Found {len(cells)} cells in {time_elapsed}"
