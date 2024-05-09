@@ -25,6 +25,8 @@ def normalize(filtered_planes: torch.Tensor, clipping_value: float) -> None:
     filtered_planes_1d.sub_(planes_min)
     # take max after subtraction
     planes_max = torch.max(filtered_planes_1d, dim=1, keepdim=True)[0]
+    # if min = max = zero, divide by 1 - it'll stay zero
+    planes_max[planes_max == 0] = 1
     filtered_planes_1d.div_(planes_max)
 
     # To leave room to label in the 3d detection.
