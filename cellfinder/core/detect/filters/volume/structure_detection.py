@@ -135,17 +135,17 @@ class CellDetector:
     """
 
     def __init__(
-        self, width: int, height: int, start_z: int, soma_centre_value: int
+        self, height: int, width: int, start_z: int, soma_centre_value: int
     ):
         """
         Parameters
         ----------
-        width, height
+        height, width:
             Shape of the planes input to self.process()
         start_z:
             The z-coordinate of the first processed plane.
         """
-        self.shape = width, height
+        self.shape = height, width
         self.z = start_z
         self.next_structure_id = 1
         self.soma_centre_value = soma_centre_value
@@ -164,7 +164,7 @@ class CellDetector:
         self, plane: np.ndarray, previous_plane: Optional[np.ndarray]
     ) -> np.ndarray:
         """
-        Process a new plane.
+        Process a new plane (should be in Y, X axis order).
         """
         if plane.shape[:2] != self.shape:
             raise ValueError("plane does not have correct shape")
@@ -189,21 +189,21 @@ class CellDetector:
         -------
         plane :
             Plane with pixels either set to zero (no structure) or labelled
-            with their structure ID.
+            with their structure ID. Plane is in Y, X axis order.
         """
         soma_centre_value = self.soma_centre_value
-        for y in range(plane.shape[1]):
-            for x in range(plane.shape[0]):
-                if plane[x, y] == soma_centre_value:
+        for y in range(plane.shape[0]):
+            for x in range(plane.shape[1]):
+                if plane[y, x] == soma_centre_value:
                     # Labels of structures below, left and behind
                     neighbour_ids = np.zeros(3, dtype=sid_np_type)
                     # If in bounds look at neighbours
-                    if x > 0:
-                        neighbour_ids[0] = plane[x - 1, y]
                     if y > 0:
-                        neighbour_ids[1] = plane[x, y - 1]
+                        neighbour_ids[0] = plane[y - 1, x]
+                    if x > 0:
+                        neighbour_ids[1] = plane[y, x - 1]
                     if previous_plane is not None:
-                        neighbour_ids[2] = previous_plane[x, y]
+                        neighbour_ids[2] = previous_plane[y, x]
 
                     if is_new_structure(neighbour_ids):
                         neighbour_ids[0] = self.next_structure_id
@@ -214,17 +214,20 @@ class CellDetector:
                     # structure in next iterations
                     struct_id = 0
 
-                plane[x, y] = struct_id
+                plane[y, x] = struct_id
 
         return plane
 
     def get_cell_centres(self) -> np.ndarray:
+        """
+        Returns the 2D array of cell centers. It's (N, 3) with X, Y, Z columns.
+        """
         return self.structures_to_cells()
 
     def get_structures(self) -> Dict[int, np.ndarray]:
         """
         Gets the structures as a dict of structure IDs mapped to the 2D array
-        of structure points.
+        of structure points (points vs x, y, z columns).
         """
         d = {}
         for sid, points in self.coords_maps.items():
@@ -243,7 +246,7 @@ class CellDetector:
         self, sid: int, point: Union[tuple, list, np.ndarray]
     ) -> None:
         """
-        Add single 3d *point* to the structure with the given *sid*.
+        Add single 3d (x, y, z) *point* to the structure with the given *sid*.
         """
         if sid not in self.coords_maps:
             self.coords_maps[sid] = typed.List.empty_list(tuple_point_type)
@@ -253,7 +256,7 @@ class CellDetector:
     def add_points(self, sid: int, points: np.ndarray):
         """
         Adds ndarray of *points* to the structure with the given *sid*.
-        Each row is a 3d point.
+        Each row is a 3-column (x, y, z) point.
         """
         if sid not in self.coords_maps:
             self.coords_maps[sid] = typed.List.empty_list(tuple_point_type)

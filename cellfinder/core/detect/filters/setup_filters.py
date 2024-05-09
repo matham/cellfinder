@@ -46,13 +46,9 @@ class DetectionSettings:
 
     voxel_sizes: Tuple[float, float, float]
     soma_spread_factor: float
-    soma_diameter: int
     soma_diameter_um: float
-    max_cluster_size: int
     max_cluster_size_um3: float
-    ball_xy_size: int
     ball_xy_size_um: float
-    ball_z_size: int
     ball_z_size_um: float
 
     start_plane: int
@@ -71,12 +67,20 @@ class DetectionSettings:
     save_planes: bool = False
     plane_directory: Optional[str] = None
 
-    batch_size: int = 4
+    batch_size: int = 1
     torch_device: str = "cpu"
 
     num_prefetch_batches: int = 2
 
     n_splitting_iter: int = 10
+
+    def __getstate__(self):
+        d = self.__dict__.copy()
+        # when sending across processes, we need to be able to pickle. This
+        # property cannot be pickled (and doesn't need to be)
+        if "filter_data_converter_func" in d:
+            del d["filter_data_converter_func"]
+        return d
 
     @cached_property
     def filter_data_converter_func(self) -> Callable[[np.ndarray], np.ndarray]:
@@ -113,19 +117,19 @@ class DetectionSettings:
         return get_max_possible_int_value(getattr(np, self.filterting_dtype))
 
     @property
-    def tile_dim1(self) -> int:
+    def tile_height(self) -> int:
         return self.soma_diameter * 2
 
     @property
-    def tile_dim2(self) -> int:
+    def tile_width(self) -> int:
         return self.soma_diameter * 2
 
     @property
-    def plane_dim1(self) -> int:
+    def plane_height(self) -> int:
         return self.plane_shape[0]
 
     @property
-    def plane_dim2(self) -> int:
+    def plane_width(self) -> int:
         return self.plane_shape[1]
 
     @property
@@ -133,22 +137,45 @@ class DetectionSettings:
         n = get_num_processes(min_free_cpu_cores=self.n_free_cpus)
         return max(n - 1, 1)
 
+    @cached_property
+    def soma_diameter(self) -> int:
+        voxel_sizes = self.voxel_sizes
+        mean_in_plane_pixel_size = 0.5 * (
+            float(voxel_sizes[2]) + float(voxel_sizes[1])
+        )
+        return int(round(self.soma_diameter_um / mean_in_plane_pixel_size))
 
-def setup_tile_filtering(plane: np.ndarray) -> Tuple[int, int]:
-    """
-    Setup values that are used to threshold the plane during 2D filtering.
+    @cached_property
+    def max_cluster_size(self) -> int:
+        voxel_sizes = self.voxel_sizes
+        voxel_volume = (
+            float(voxel_sizes[2])
+            * float(voxel_sizes[1])
+            * float(voxel_sizes[0])
+        )
+        return int(round(self.max_cluster_size_um3 / voxel_volume))
 
-    Returns
-    -------
-    clipping_value :
-        Upper value used to clip planes before 2D filtering. This is chosen
-        to leave two numbers left that can later be used to mark bright points
-        during the 2D and 3D filtering stages.
-    threshold_value :
-        Value used to mark bright pixels after 2D filtering.
-    """
-    max_value = get_max_possible_int_value(plane)
-    clipping_value = max_value - 2
-    thrsh_val = max_value - 1
+    @cached_property
+    def ball_xy_size(self) -> int:
+        voxel_sizes = self.voxel_sizes
+        mean_in_plane_pixel_size = 0.5 * (
+            float(voxel_sizes[2]) + float(voxel_sizes[1])
+        )
+        return int(round(self.ball_xy_size_um / mean_in_plane_pixel_size))
 
-    return clipping_value, thrsh_val
+    @cached_property
+    def ball_z_size(self) -> int:
+        voxel_sizes = self.voxel_sizes
+        ball_z_size = int(round(self.ball_z_size_um / float(voxel_sizes[0])))
+
+        if not ball_z_size:
+            raise ValueError(
+                "Ball z size has been calculated to be 0 voxels."
+                " This may be due to large axial spacing of your data or the "
+                "ball_z_size_um parameter being too small. "
+                "Please check input parameters are correct. "
+                "Note that cellfinder requires high resolution data in all "
+                "dimensions, so that cells can be detected in multiple "
+                "image planes."
+            )
+        return ball_z_size

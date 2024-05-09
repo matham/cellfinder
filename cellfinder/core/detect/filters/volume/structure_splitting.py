@@ -20,6 +20,10 @@ class StructureSplitException(Exception):
 
 
 def get_shape(xs: np.ndarray, ys: np.ndarray, zs: np.ndarray) -> List[int]:
+    """
+    Takes a list of x, y, z coordinates and returns a volume size such that
+    all the points will fit into it. With axis order = x, y, z.
+    """
     # +1 because difference. TEST:
     shape = [int((dim.max() - dim.min()) + 1) for dim in (xs, ys, zs)]
     return shape
@@ -29,32 +33,42 @@ def coords_to_volume(
     xs: np.ndarray,
     ys: np.ndarray,
     zs: np.ndarray,
+    volume_shape: Tuple[int, int, int],
     ball_radius: int,
     dtype: np.dtype,
     threshold_value: int,
-) -> np.ndarray:
+) -> torch.Tensor:
+    """
+    Takes the series of x, y, z points along with the shape of the volume
+    that fully enclose them (also x, y, z order). It than expands the
+    shape by the ball diameter in each axis. Then, each point, shifted
+    by the radius internally is set to the threshold value.
+
+    The volume is then transposed and returned in the Z, Y, X order.
+    """
     ball_diameter = ball_radius * 2
     # Expanded to ensure the ball fits even at the border
-    expanded_shape = [
-        dim_size + ball_diameter for dim_size in get_shape(zs, xs, ys)
-    ]
+    expanded_shape = [dim_size + ball_diameter for dim_size in volume_shape]
+    # volume is now x, y, z order
     volume = torch.zeros(expanded_shape, dtype=dtype)
 
     x_min, y_min, z_min = xs.min(), ys.min(), zs.min()
 
+    # shift the points so any sphere centered on it would not have its
+    # radius expand beyond the volume
     relative_xs = np.array((xs - x_min + ball_radius), dtype=np.int64)
     relative_ys = np.array((ys - y_min + ball_radius), dtype=np.int64)
     relative_zs = np.array((zs - z_min + ball_radius), dtype=np.int64)
 
-    # OPTIMISE: vectorize
+    # set each point as the center with a value of threshold
     for rel_x, rel_y, rel_z in zip(relative_xs, relative_ys, relative_zs):
-        volume[rel_z, rel_x, rel_y] = threshold_value
-    return volume
+        volume[rel_x, rel_y, rel_z] = threshold_value
+    return volume.moveaxis(0, 2)
 
 
 def ball_filter_imgs(
-    volume: np.ndarray, settings: DetectionSettings
-) -> Tuple[np.ndarray, np.ndarray]:
+    volume: torch.Tensor, settings: DetectionSettings
+) -> np.ndarray:
     """
     Apply ball filtering to a 3D volume and detect cell centres.
 
@@ -62,34 +76,41 @@ def ball_filter_imgs(
     and the `CellDetector` class to detect cell centres.
 
     Args:
-        volume (np.ndarray): The 3D volume to be filtered.
-        threshold_value (int): The threshold value for ball filtering.
-        soma_centre_value (int): The value representing the soma centre.
-        ball_xy_size (int, optional):
-            The size of the ball filter in the XY plane. Defaults to 3.
-        ball_z_size (int, optional):
-            The size of the ball filter in the Z plane. Defaults to 3.
+        volume (torch.Tensor): The 3D volume to be filtered (Z, Y, X order).
+        settings (DetectionSettings):
+            The settings to use.
 
     Returns:
-        Tuple[np.ndarray, np.ndarray]:
-            A tuple containing the filtered volume and the cell centres.
+        The 2D array of cell centres (N, 3) - X, Y, Z order.
 
     """
-    # OPTIMISE: reuse ball filter instance
-    plane_width, plane_height = volume.shape[1:]
     detection_dtype = settings.detection_dtype
     batch_size = settings.batch_size
 
     # make sure volume is not less than kernel etc
     try:
-        bf = BallFilter(settings=settings, use_mask=False)
+        bf = BallFilter(
+            plane_height=settings.plane_height,
+            plane_width=settings.plane_width,
+            ball_xy_size=settings.ball_xy_size,
+            ball_z_size=settings.ball_z_size,
+            overlap_fraction=settings.ball_overlap_fraction,
+            threshold_value=settings.threshold_value,
+            soma_centre_value=settings.soma_centre_value,
+            tile_height=settings.tile_height,
+            tile_width=settings.tile_width,
+            dtype=settings.filterting_dtype,
+            batch_size=batch_size,
+            torch_device=settings.torch_device,
+            use_mask=False,  # we don't need a mask here
+        )
     except InvalidVolume:
         return np.empty((0, 3))
 
     start_z = bf.first_valid_plane
     cell_detector = CellDetector(
-        plane_width,
-        plane_height,
+        settings.plane_height,
+        settings.plane_width,
         start_z=start_z,
         soma_centre_value=settings.soma_centre_value,
     )
@@ -100,30 +121,40 @@ def ball_filter_imgs(
 
         if bf.ready:
             bf.walk()
-            middle_planes = bf.get_middle_planes()
-            volume[z : z + middle_planes.shape[0], :, :] = torch.from_numpy(
+
+            middle_planes = bf.get_processed_planes()
+            n = middle_planes.shape[0]
+
+            # we edit volume, but only for planes already processed that won't
+            # be passed to the filter in this run
+            volume[start_z : start_z + n, :, :] = torch.from_numpy(
                 middle_planes
             )
+            start_z += n
 
+            # convert to type needed for detection
             middle_planes = middle_planes.astype(detection_dtype)
             for plane in middle_planes:
                 previous_plane = cell_detector.process(plane, previous_plane)
+
     return cell_detector.get_cell_centres()
 
 
 def iterative_ball_filter(
-    volume: np.ndarray, settings: DetectionSettings
+    volume: torch.Tensor, settings: DetectionSettings
 ) -> Tuple[List[int], List[np.ndarray]]:
     """
     Apply iterative ball filtering to the given volume.
     The volume is eroded at each iteration, by subtracting 1 from the volume.
 
     Parameters:
-        volume (np.ndarray): The input volume.
+        volume (torch.Tensor): The input volume. It is edited inplace.
+            Of shape Z, Y, X.
+        settings (DetectionSettings): The settings to use.
 
     Returns:
-        Tuple[List[int], List[np.ndarray]]: A tuple containing two lists:
-            The structures found in each iteration.
+        tuple: A tuple containing two lists:
+            The number of structures found in each iteration.
             The cell centres found in each iteration.
     """
     ns = []
@@ -144,10 +175,19 @@ def iterative_ball_filter(
 
 def check_centre_in_cuboid(centre: np.ndarray, max_coords: np.ndarray) -> bool:
     """
-    Checks whether a coordinate is in a cuboid
-    :param centre: x,y,z coordinate
-    :param max_coords: far corner of cuboid
-    :return: True if within cuboid, otherwise False
+    Checks whether a coordinate is in a cuboid.
+
+    Parameters
+    ----------
+
+    centre : np.ndarray
+        x, y, z coordinate.
+    max_coords : np.ndarray
+        Far corner of cuboid.
+
+    Returns
+    -------
+    True if within cuboid, otherwise False.
     """
     relative_coords = centre
     if (relative_coords > max_coords).all():
@@ -170,28 +210,24 @@ def split_cells(
         cell_points (np.ndarray): Array of cell points with shape (N, 3),
             where N is the number of cell points and each point is represented
             by its x, y, and z coordinates.
-        outlier_keep (bool, optional): Flag indicating whether to keep outliers
-            during the splitting process. Defaults to False.
+        settings DetectionSettings: The settings to use for splitting. It is
+        modified inplace.
 
     Returns:
         np.ndarray: Array of absolute cell centres with shape (M, 3),
             where M is the number of individual cells and each centre is
             represented by its x, y, and z coordinates.
     """
+    # these points are in x, y, z order columnwise, in absolute pixels
     orig_centre = get_structure_centre(cell_points)
 
     xs = cell_points[:, 0]
     ys = cell_points[:, 1]
     zs = cell_points[:, 2]
 
-    orig_corner = np.array(
-        [
-            orig_centre[0] - (orig_centre[0] - xs.min()),
-            orig_centre[1] - (orig_centre[1] - ys.min()),
-            orig_centre[2] - (orig_centre[2] - zs.min()),
-        ]
-    )
-
+    # corner coordinates in absolute pixels
+    orig_corner = np.array([xs.min(), ys.min(), zs.min()])
+    # volume center relative to corner
     relative_orig_centre = np.array(
         [
             orig_centre[0] - orig_corner[0],
@@ -200,44 +236,45 @@ def split_cells(
         ]
     )
 
+    # total volume enclosing all points
     original_bounding_cuboid_shape = get_shape(xs, ys, zs)
 
     ball_radius = settings.ball_xy_size // 2
     dtype = getattr(torch, settings.filterting_dtype)
+    # volume is now z, y, x order
     vol = coords_to_volume(
         xs,
         ys,
         zs,
+        volume_shape=original_bounding_cuboid_shape,
         ball_radius=ball_radius,
         dtype=dtype,
         threshold_value=settings.threshold_value,
     )
+
+    # get an estimate of how much memory processing a single batch of planes
+    # takes. For this reduced volume, our batch will be such that it uses at
+    # most that much memory
     total_vol_size = (
-        settings.plane_dim1 * settings.plane_dim2 * settings.batch_size
+        settings.plane_height * settings.plane_width * settings.batch_size
     )
     batch_size = total_vol_size // (vol.shape[1] * vol.shape[2])
     batch_size = min(batch_size, vol.shape[0])
 
-    settings.ball_z_size = 3
-    settings.ball_xy_size = 3
-    settings.ball_overlap_fraction = 0.8
+    # update settings with our volume data
     settings.plane_shape = vol.shape[1:]
-    settings.soma_diameter = 7
-    settings.soma_spread_factor = 1.4
-    settings.max_cluster_size = 1348
     settings.start_plane = 0
     settings.end_plane = vol.shape[0]
     settings.n_planes = settings.end_plane
     settings.batch_size = batch_size
-    settings.torch_device = "cpu"
 
     # centres is a list of arrays of centres (1 array of centres per ball run)
+    # in x, y, z order
     ns, centres = iterative_ball_filter(vol, settings)
     ns.insert(0, 1)
     centres.insert(0, np.array([relative_orig_centre]))
 
     best_iteration = ns.index(max(ns))
-
     # TODO: put constraint on minimum centres distance ?
     relative_centres = centres[best_iteration]
 
@@ -253,7 +290,7 @@ def split_cells(
         )
 
     absolute_centres = np.empty((len(relative_centres), 3))
-    # FIXME: extract functionality
+    # convert centers to absolute pixels
     absolute_centres[:, 0] = orig_corner[0] + relative_centres[:, 0]
     absolute_centres[:, 1] = orig_corner[1] + relative_centres[:, 1]
     absolute_centres[:, 2] = orig_corner[2] + relative_centres[:, 2]

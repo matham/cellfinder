@@ -1,13 +1,34 @@
+from functools import wraps
 from random import getrandbits, uniform
 from typing import Callable, Optional
 
 import numpy as np
+import torch
 from natsort import natsorted
 
 
-def get_max_possible_int_value(dtype) -> int:
+def inference_wrapper(func):
     """
-    Returns the maximum allowed value for a numpy array of integer data type.
+    Decorator that makes the decorated function/method run with
+    `torch.inference_mode` set to True.
+    """
+
+    @wraps(func)
+    def inner_function(*args, **kwargs):
+        with torch.inference_mode(True):
+            return func(*args, **kwargs)
+
+    return inner_function
+
+
+def get_max_possible_int_value(dtype: np.dtype) -> int:
+    """
+    Returns the maximum allowed integer for a numpy array of given type.
+
+    If dtype is of integer type, it's the maximum value. If it's a floating
+    type, it's the maximum integer that can be accurately represented.
+    E.g. for float32, only integers up to 2**24 can be represented (due to
+    the number of bits representing the mantissa (significand).
     """
     if np.issubdtype(dtype, np.integer):
         return np.iinfo(dtype).max
@@ -18,8 +39,31 @@ def get_max_possible_int_value(dtype) -> int:
 
 
 def get_data_converter(
-    src_dtype: np.dtype, dest_dtype: np.dtype, scale_down: bool = True
+    src_dtype: np.dtype, dest_dtype: np.dtype
 ) -> Callable[[np.ndarray], np.ndarray]:
+    """
+    Returns a function that can be called to convert one data-type to another,
+    scaling the data down as needed.
+
+    If the maximum value supported by the input data-type is smaller than that
+    supported by destination data-type, the data will be scaled by the ratio
+    of maximum integer representable by the `output / input` data-types.
+    If the max is equal or less, it's simply converted to the target type.
+
+    Parameters
+    ----------
+    src_dtype : np.dtype
+        The data-type of the input data.
+    dest_dtype : np.dtype
+        The data-type of the returned data. Currently it must be a floating
+        type (e.g. `np.float32`, `np.float64`).
+
+    Returns
+    -------
+    callable: function
+        A function that takes a single input data parameter and returns
+        the converted data.
+    """
     if not np.issubdtype(dest_dtype, np.floating):
         raise ValueError(
             f"Destination dtype must be a floating type, but is {dest_dtype}"
