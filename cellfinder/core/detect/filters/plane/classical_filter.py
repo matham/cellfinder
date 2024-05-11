@@ -11,10 +11,10 @@ from kornia.filters.kernels import (
 @torch.jit.script
 def normalize(filtered_planes: torch.Tensor, clipping_value: float) -> None:
     """
-    Normalizes the 3d tensor so each z-plane is independantly scaled to be
+    Normalizes the 3d tensor so each z-plane is independently scaled to be
     in the [0, clipping_value] range.
 
-    It it done to filtered_planes inplace.
+    It is done to filtered_planes inplace.
     """
     num_z = filtered_planes.shape[0]
     filtered_planes_1d = filtered_planes.view(num_z, -1)
@@ -50,7 +50,7 @@ def filter_for_peaks(
     filtered_planes = planes.unsqueeze(1)  # ZYX -> ZCYX input
 
     # ---------- median filter ----------
-    # extract patches to compute median over for each pizel
+    # extract patches to compute median over for each pixel
     # We go from ZCYX -> ZCYX, C=1 to C=9 and containing the elements around
     # each Z,X,Y over which we compute the median
     filtered_planes = F.conv2d(filtered_planes, bin_kernel, padding="same")

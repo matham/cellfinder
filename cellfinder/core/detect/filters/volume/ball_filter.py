@@ -220,7 +220,7 @@ class BallFilter:
         return self.volume.shape[0] >= self.kernel_z_size
 
     def append(
-        self, planes: np.ndarray, masks: Optional[np.ndarray] = None
+        self, planes: torch.Tensor, masks: Optional[torch.Tensor] = None
     ) -> None:
         """
         Add a new z-stack to the filter.

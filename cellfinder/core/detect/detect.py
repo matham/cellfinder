@@ -19,6 +19,7 @@ from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.multiprocessing as torch_mp
 from brainglobe_utils.cells.cells import Cell
 
 from cellfinder.core import logger, types
@@ -112,14 +113,14 @@ def main(
 
     batch_size : int, optional
         The number of planes to process in each batch. Defaults to 1.
-        For CPU, there's no benifit for a larger batch size. Only a memory
+        For CPU, there's no benefit for a larger batch size. Only a memory
         usage increase. For CUDA, the larger the batch size the better the
         performance. Until it fills up the GPU memory - after which it
         becomes slower.
 
     torch_device : str, optional
-        The device on which to run the computation. By default it's "cpu".
-        To run on a gpu, specifiy the PyTorch device name, such as "cuda" to
+        The device on which to run the computation. By default, it's "cpu".
+        To run on a gpu, specify the PyTorch device name, such as "cuda" to
         run on the first GPU.
 
     callback : Callable[int], optional
@@ -148,12 +149,14 @@ def main(
 
     # pytorch requires floats for many operations, we can use float64,
     # but it's slower
-    filterting_dtype = "float32"
+    filtering_dtype = "float32"
+    torch_device = torch_device.lower()
+    batch_size = max(batch_size, 1)
 
     settings = DetectionSettings(
         plane_shape=signal_array.shape[1:],
         plane_original_np_dtype=signal_array.dtype,
-        filterting_dtype=filterting_dtype,
+        filtering_dtype=filtering_dtype,
         voxel_sizes=voxel_sizes,
         soma_spread_factor=soma_spread_factor,
         soma_diameter_um=soma_diameter,
@@ -182,7 +185,7 @@ def main(
     splitting_settings.ball_overlap_fraction = split_ball_overlap_fraction
     splitting_settings.soma_diameter = split_soma_diameter
     # always run on cpu because copying to gpu overhead is likely slower than
-    # any benfit for detection on smallish volumes
+    # any benefit for detection on smallish volumes
     splitting_settings.torch_device = "cpu"
 
     # Create 3D analysis filter
@@ -193,24 +196,32 @@ def main(
         plane_shape=settings.plane_shape,
         clipping_value=settings.clipping_value,
         threshold_value=settings.threshold_value,
-        n_sds_above_mean_thresh=settings.n_sds_above_mean_thresh,
-        log_sigma_size=settings.log_sigma_size,
+        n_sds_above_mean_thresh=n_sds_above_mean_thresh,
+        log_sigma_size=log_sigma_size,
         soma_diameter=settings.soma_diameter,
-        torch_device=settings.torch_device,
-        dtype=settings.filterting_dtype,
+        torch_device=torch_device,
+        dtype=settings.filtering_dtype,
     )
 
     orig_n_threads = torch.get_num_threads()
-    # as seen in the benchmarks in the original PR, especially when running on
-    # CPU, using more than ~36 cores actually starts to result in slowdowns so
-    # limit to 32 cores.
-    torch.set_num_threads(min(settings.n_processes, 32))
+    torch.set_num_threads(settings.n_torch_comp_threads)
 
     with torch.inference_mode(True):
         # process the data
-        mp_3d_filter.process(
-            mp_tile_processor, signal_array, callback=callback
-        )
+        if torch_device == "cpu":
+            ctx = torch_mp.get_context("spawn")
+            with ctx.Pool(processes=batch_size) as pool:
+                mp_3d_filter.process(
+                    mp_tile_processor,
+                    signal_array,
+                    pool=pool,
+                    callback=callback,
+                )
+        else:
+            mp_3d_filter.process(
+                mp_tile_processor, signal_array, callback=callback
+            )
+
         cells = mp_3d_filter.get_results(splitting_settings)
 
     torch.set_num_threads(orig_n_threads)

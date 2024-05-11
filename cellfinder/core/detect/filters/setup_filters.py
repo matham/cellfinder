@@ -10,6 +10,11 @@ from cellfinder.core.tools.tools import (
     get_max_possible_int_value,
 )
 
+# as seen in the benchmarks in the original PR, when running on CPU using
+# more than ~36 cores it starts to result in slowdowns. So limit to 32 cores
+# when doing computational work (e.g. torch.functional.Conv2D)
+MAX_TORCH_COMP_THREADS = 32
+
 
 @dataclass
 class DetectionSettings:
@@ -42,7 +47,7 @@ class DetectionSettings:
 
     plane_shape: Tuple[int, int]
     plane_original_np_dtype: np.dtype
-    filterting_dtype: str
+    filtering_dtype: str
 
     voxel_sizes: Tuple[float, float, float]
     soma_spread_factor: float
@@ -85,12 +90,12 @@ class DetectionSettings:
     @cached_property
     def filter_data_converter_func(self) -> Callable[[np.ndarray], np.ndarray]:
         return get_data_converter(
-            self.plane_original_np_dtype, getattr(np, self.filterting_dtype)
+            self.plane_original_np_dtype, getattr(np, self.filtering_dtype)
         )
 
     @cached_property
     def detection_dtype(self) -> np.dtype:
-        working_dtype = getattr(np, self.filterting_dtype)
+        working_dtype = getattr(np, self.filtering_dtype)
         if np.issubdtype(working_dtype, np.integer):
             # already integer, return it
             return working_dtype
@@ -103,18 +108,18 @@ class DetectionSettings:
     @cached_property
     def clipping_value(self) -> int:
         return (
-            get_max_possible_int_value(getattr(np, self.filterting_dtype)) - 2
+            get_max_possible_int_value(getattr(np, self.filtering_dtype)) - 2
         )
 
     @cached_property
     def threshold_value(self) -> int:
         return (
-            get_max_possible_int_value(getattr(np, self.filterting_dtype)) - 1
+            get_max_possible_int_value(getattr(np, self.filtering_dtype)) - 1
         )
 
     @cached_property
     def soma_centre_value(self) -> int:
-        return get_max_possible_int_value(getattr(np, self.filterting_dtype))
+        return get_max_possible_int_value(getattr(np, self.filtering_dtype))
 
     @property
     def tile_height(self) -> int:
@@ -136,6 +141,14 @@ class DetectionSettings:
     def n_processes(self) -> int:
         n = get_num_processes(min_free_cpu_cores=self.n_free_cpus)
         return max(n - 1, 1)
+
+    @property
+    def n_torch_comp_threads(self) -> int:
+        # Reserve batch_size cores for batch parallelization on CPU, 1 per
+        # plane. for GPU it doesn't matter either way because it doesn't use
+        # threads
+        n = max(1, self.n_processes - self.batch_size)
+        return min(n, MAX_TORCH_COMP_THREADS)
 
     @cached_property
     def soma_diameter(self) -> int:

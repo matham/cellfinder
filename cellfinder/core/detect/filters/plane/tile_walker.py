@@ -58,6 +58,13 @@ class TileWalker:
             self.tile_width,
         )
 
+    def get_tiled_buffer(self, depth: int, device: str):
+        return torch.zeros(
+            (depth, self.n_tiles_height, self.n_tiles_width),
+            dtype=torch.bool,
+            device=device,
+        )
+
 
 @torch.jit.script
 def _get_out_of_brain_threshold(
@@ -132,7 +139,7 @@ def _get_bright_tiles(
     bright = tile_avg >= thresholds
     # tile_avg and bright may be smaller than bright_tiles_mask because
     # avg_pool2d first subtracts the kernel size before computing # tiles.
-    # So contrain view to that size
+    # So contain view to that size
     bright_tiles_mask[:, : bright.shape[1], : bright.shape[2]][bright] = True
 
     return bright_tiles_mask

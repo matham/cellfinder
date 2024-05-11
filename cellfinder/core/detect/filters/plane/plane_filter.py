@@ -37,7 +37,7 @@ class TileProcessor:
         been run through the 2D filter.
     n_sds_above_mean_thresh : float
         Number of standard deviations above the mean threshold to use for
-        determineing whether a voxel is bright.
+        determining whether a voxel is bright.
     log_sigma_size : float
         Size of the sigma for the gaussian filter.
     soma_diameter : float
@@ -72,7 +72,7 @@ class TileProcessor:
         plane_shape: Tuple[int, int],
         clipping_value: int,
         threshold_value: int,
-        n_sds_above_mean_thresh: int,
+        n_sds_above_mean_thresh: float,
         log_sigma_size: float,
         soma_diameter: int,
         torch_device: str,
@@ -99,7 +99,7 @@ class TileProcessor:
         self, planes: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Applies the filtering listed in the class descrioption.
+        Applies the filtering listed in the class description.
 
         Parameters
         ----------
@@ -127,6 +127,9 @@ class TileProcessor:
         )
 
         return enhanced_planes, inside_brain_tiles
+
+    def get_tiled_buffer(self, depth: int, device: str):
+        return self.tile_walker.get_tiled_buffer(depth, device)
 
 
 @torch.jit.script
