@@ -19,7 +19,6 @@ from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.multiprocessing as torch_mp
 from brainglobe_utils.cells.cells import Cell
 
 from cellfinder.core import logger, types
@@ -46,7 +45,7 @@ def main(
     artifact_keep: bool = False,
     save_planes: bool = False,
     plane_directory: Optional[str] = None,
-    batch_size: int = 1,
+    batch_size: Optional[int] = None,
     torch_device: str = "cpu",
     split_ball_xy_size: int = 3,
     split_ball_z_size: int = 3,
@@ -133,6 +132,11 @@ def main(
         List of detected cells.
     """
     start_time = datetime.now()
+    if batch_size is None:
+        if torch_device == "cpu":
+            batch_size = 4
+        else:
+            batch_size = 1
 
     if not np.issubdtype(signal_array.dtype, np.number):
         raise ValueError(
@@ -208,19 +212,9 @@ def main(
 
     with torch.inference_mode(True):
         # process the data
-        if torch_device == "cpu":
-            ctx = torch_mp.get_context("spawn")
-            with ctx.Pool(processes=batch_size) as pool:
-                mp_3d_filter.process(
-                    mp_tile_processor,
-                    signal_array,
-                    pool=pool,
-                    callback=callback,
-                )
-        else:
-            mp_3d_filter.process(
-                mp_tile_processor, signal_array, callback=callback
-            )
+        mp_3d_filter.process(
+            mp_tile_processor, signal_array, callback=callback
+        )
 
         cells = mp_3d_filter.get_results(splitting_settings)
 

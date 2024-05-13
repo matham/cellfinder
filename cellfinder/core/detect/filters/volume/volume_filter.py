@@ -2,12 +2,10 @@ import math
 import multiprocessing as mp
 import os
 from functools import partial
-from threading import current_thread
 from typing import Callable, List, Optional
 
 import numpy as np
 import torch
-import torch.multiprocessing as torch_mp
 from brainglobe_utils.cells.cells import Cell
 from tifffile import tifffile
 from tqdm import tqdm
@@ -24,23 +22,32 @@ from cellfinder.core.detect.filters.volume.structure_splitting import (
     StructureSplitException,
     split_cells,
 )
-from cellfinder.core.tools.threading import EOFSignal, ThreadWithException
+from cellfinder.core.tools.threading import (
+    EOFSignal,
+    ProcessWithException,
+    ThreadWithException,
+)
 from cellfinder.core.tools.tools import inference_wrapper
 
 
 @inference_wrapper
 def _plane_filter(
-    tensor: torch.Tensor,
-    masks: torch.Tensor,
-    i: int,
+    process: ProcessWithException,
     tile_processor: TileProcessor,
     n_threads: int,
 ):
     torch.set_num_threads(n_threads)
 
-    plane, mask = tile_processor.get_tile_mask(tensor[i : i + 1, :, :])
-    tensor[i : i + 1, :, :] = plane
-    masks[i : i + 1, :, :] = mask
+    while True:
+        msg = process.get_msg_from_mainthread()
+        if msg == EOFSignal:
+            return
+        tensor, masks, i = msg
+
+        plane, mask = tile_processor.get_tile_mask(tensor[i : i + 1, :, :])
+        tensor[i : i + 1, :, :] = plane
+        masks[i : i + 1, :, :] = mask
+        process.send_msg_to_mainthread(None)
 
 
 class VolumeFilter:
@@ -97,9 +104,10 @@ class VolumeFilter:
     @inference_wrapper
     def _feed_signal_batches(
         self,
+        thread: ThreadWithException,
         data: types.array,
         tile_processor: TileProcessor,
-        pool: Optional[torch_mp.Pool],
+        processors: List[ProcessWithException],
     ) -> None:
         """
         Runs in its own thread. It loads the input data planes, converts them
@@ -113,9 +121,6 @@ class VolumeFilter:
         end_plane = start_plane + self.settings.n_planes
         data_converter = self.settings.filter_data_converter_func
         torch_dtype = getattr(torch, self.settings.filtering_dtype)
-        n_threads = self.settings.n_torch_comp_threads
-
-        thread: ThreadWithException = current_thread()
 
         # create pinned tensors ahead of time for faster copying to gpu.
         # Pinned tensors are kept in RAM and are faster to copy to GPU because
@@ -153,20 +158,15 @@ class VolumeFilter:
             # send to device - it won't block here because we pinned memory
             tensor_dev = tensor[:n, :, :].to(device=device, non_blocking=True)
 
-            if pool is None:
-                msg = tensor, tensor_dev, None, None
-            else:
-                futures = []
+            used_processors = []
+            masks = None
+            if processors:
                 masks = tile_processor.get_tiled_buffer(n, device)
-                for i in range(n):
-                    futures.append(
-                        pool.apply_async(
-                            _plane_filter,
-                            (tensor_dev, masks, i, tile_processor, n_threads),
-                        )
-                    )
+                used_processors = processors[:n]
+                for i, process in enumerate(used_processors):
+                    process.send_msg_to_thread((tensor_dev, masks, i))
 
-                msg = tensor, tensor_dev, masks, futures
+            msg = tensor, tensor_dev, masks, used_processors
 
             if n < batch_size:
                 # or last batch, we are also done after this
@@ -181,7 +181,6 @@ class VolumeFilter:
         tile_processor: TileProcessor,
         signal_array,
         *,
-        pool: Optional[torch_mp.Pool] = None,
         callback: Optional[Callable[[int], None]],
     ) -> None:
         """
@@ -195,28 +194,51 @@ class VolumeFilter:
         progress_bar = tqdm(
             total=self.settings.n_planes, desc="Processing planes"
         )
+        cpu = self.settings.torch_device == "cpu"
+        n_threads = self.settings.n_torch_comp_threads
+
+        # processes
+        plane_processes = []
+        if cpu:
+            for _ in range(self.settings.batch_size):
+                process = ProcessWithException(
+                    target=_plane_filter,
+                    args=(tile_processor, n_threads),
+                    pass_self=True,
+                )
+                process.start()
+                plane_processes.append(process)
+
         # thread that loads and sends us data
         feed_thread = ThreadWithException(
             target=self._feed_signal_batches,
-            args=(signal_array, tile_processor, pool),
+            args=(signal_array, tile_processor, plane_processes),
+            pass_self=True,
         )
         feed_thread.start()
+
         # thread that takes the filtered data and does cell detection
         cells_thread = ThreadWithException(
-            target=self._run_filter_thread, args=(callback, progress_bar)
+            target=self._run_filter_thread,
+            args=(callback, progress_bar),
+            pass_self=True,
         )
         cells_thread.start()
 
         try:
-            self._process(feed_thread, cells_thread, tile_processor)
+            self._process(feed_thread, cells_thread, tile_processor, cpu)
         finally:
             # if we end, make sure to tell the threads to stop
             feed_thread.notify_to_end_thread()
             cells_thread.notify_to_end_thread()
+            for process in plane_processes:
+                process.notify_to_end_thread()
 
         # the notification above ensures this won't block forever
         feed_thread.join()
         cells_thread.join()
+        for process in plane_processes:
+            process.join()
 
         progress_bar.close()
         logger.debug("3D filter done")
@@ -226,24 +248,27 @@ class VolumeFilter:
         feed_thread: ThreadWithException,
         cells_thread: ThreadWithException,
         tile_processor: TileProcessor,
+        cpu: bool,
     ) -> None:
+        processing_tensors = []
         while True:
             # thread/underlying queues get first crack at msg. Unless we
             # get eof, this will block until we get more loaded data
             msg = feed_thread.get_msg_from_thread()
             if msg is EOFSignal:
                 break
-            tensor, tensor_dev, masks, futures = msg
+            tensor, tensor_dev, masks, used_processors = msg
+            processing_tensors.append(tensor)
 
-            if futures is None:
-                # we're not doing 2d filtering in different process
-                planes, masks = tile_processor.get_tile_mask(tensor_dev)
-            else:
+            if cpu:
                 # we did 2d filtering in different process
                 planes = tensor_dev
                 # make sure all the planes in the tensor are done filtering
-                for fut in futures:
-                    fut.get()
+                for process in used_processors:
+                    process.get_msg_from_thread()
+            else:
+                # we're not doing 2d filtering in different process
+                planes, masks = tile_processor.get_tile_mask(tensor_dev)
 
             self.ball_filter.append(planes, masks)
             if self.ball_filter.ready:
@@ -252,7 +277,9 @@ class VolumeFilter:
 
                 # at this point we know input tensor can be reused - return
                 # it so feeder thread can load more data into it
-                feed_thread.send_msg_to_thread(tensor)
+                for tensor in processing_tensors:
+                    feed_thread.send_msg_to_thread(tensor)
+                processing_tensors.clear()
 
                 # thread/underlying queues get first crack at msg. Unless
                 # we get eof, this will block until we get a token,
@@ -267,12 +294,13 @@ class VolumeFilter:
                 cells_thread.send_msg_to_thread((middle_planes, token))
 
     @inference_wrapper
-    def _run_filter_thread(self, callback, progress_bar) -> None:
+    def _run_filter_thread(
+        self, thread: ThreadWithException, callback, progress_bar
+    ) -> None:
         """
         Runs in its own thread and takes the filtered planes and passes them
         through the cell detection system. Also saves the planes as needed.
         """
-        thread: ThreadWithException = current_thread()
         detector = self.cell_detector
         detection_dtype = self.settings.detection_dtype
         previous_plane = None

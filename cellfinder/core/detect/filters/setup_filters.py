@@ -146,8 +146,8 @@ class DetectionSettings:
     def n_torch_comp_threads(self) -> int:
         # Reserve batch_size cores for batch parallelization on CPU, 1 per
         # plane. for GPU it doesn't matter either way because it doesn't use
-        # threads
-        n = max(1, self.n_processes - self.batch_size)
+        # threads. Also reserve for data feeding thread and cell detection
+        n = max(1, self.n_processes - self.batch_size - 2)
         return min(n, MAX_TORCH_COMP_THREADS)
 
     @cached_property
