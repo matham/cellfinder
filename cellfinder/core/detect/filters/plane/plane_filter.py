@@ -49,6 +49,9 @@ class TileProcessor:
     dtype : str
         The data-type of the input planes and the type to use internally.
         E.g. "float32".
+    use_scipy : bool
+        If running on the CPU whether to use the scipy filters or the same
+        pytorch filters used on CUDA. Scipy filters can be faster.
     """
 
     # Upper value that the input plane is clipped to. Result is scaled so
@@ -77,6 +80,7 @@ class TileProcessor:
         soma_diameter: int,
         torch_device: str,
         dtype: str,
+        use_scipy: bool,
     ):
         self.clipping_value = clipping_value
         self.threshold_value = threshold_value
@@ -88,6 +92,7 @@ class TileProcessor:
             dtype=getattr(torch, dtype),
             clipping_value=self.clipping_value,
             laplace_gaussian_sigma=laplace_gaussian_sigma,
+            use_scipy=use_scipy,
         )
 
         self.tile_walker = TileWalker(

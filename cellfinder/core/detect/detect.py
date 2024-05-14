@@ -47,6 +47,7 @@ def main(
     plane_directory: Optional[str] = None,
     batch_size: Optional[int] = None,
     torch_device: str = "cpu",
+    use_scipy: bool = True,
     split_ball_xy_size: int = 3,
     split_ball_z_size: int = 3,
     split_ball_overlap_fraction: float = 0.8,
@@ -205,6 +206,7 @@ def main(
         soma_diameter=settings.soma_diameter,
         torch_device=torch_device,
         dtype=settings.filtering_dtype,
+        use_scipy=use_scipy,
     )
 
     orig_n_threads = torch.get_num_threads()

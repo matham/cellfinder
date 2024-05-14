@@ -6,6 +6,8 @@ from kornia.filters.kernels import (
     get_laplacian_kernel2d,
     normalize_kernel2d,
 )
+from scipy.ndimage import gaussian_filter, laplace
+from scipy.signal import medfilt2d
 
 
 @torch.jit.script
@@ -121,6 +123,9 @@ class PeakEnchancer:
         clipping_value.
     laplace_gaussian_sigma : float
         Size of the sigma for the gaussian filter.
+    use_scipy : bool
+        If running on the CPU whether to use the scipy filters or the same
+        pytorch filters used on CUDA. Scipy filters can be faster.
     """
 
     # binary filter that gets square patches for each voxel so we can find the
@@ -139,8 +144,14 @@ class PeakEnchancer:
     # clipping_value
     clipping_value: float
 
+    # sigma value for gaussian filter
+    laplace_gaussian_sigma: float
+
     # the torch device to run on. E.g. cpu/cuda.
     torch_device: str
+
+    # when running on CPU whether to use pytorch or scipy for filters
+    use_scipy: bool
 
     def __init__(
         self,
@@ -148,10 +159,13 @@ class PeakEnchancer:
         dtype: torch.dtype,
         clipping_value: float,
         laplace_gaussian_sigma: float,
+        use_scipy: bool,
     ):
         super().__init__()
         self.torch_device = torch_device.lower()
         self.clipping_value = clipping_value
+        self.laplace_gaussian_sigma = laplace_gaussian_sigma
+        self.use_scipy = use_scipy
 
         # must be odd kernel
         self.bin_kernel = get_binary_kernel2d(
@@ -187,12 +201,21 @@ class PeakEnchancer:
         Applies the filtering and normalization to the 3d z-stack (not inplace)
         and returns the filtered z-stack.
         """
-        filtered_planes = filter_for_peaks(
-            planes,
-            self.bin_kernel,
-            self.gauss_kernel,
-            self.lap_kernel,
-            self.torch_device,
-        )
+        if self.torch_device == "cpu" and self.use_scipy:
+            filtered_planes = planes.clone()
+            for i in range(planes.shape[0]):
+                img = planes[i, :, :].numpy()
+                img = medfilt2d(img)
+                img = gaussian_filter(img, self.laplace_gaussian_sigma)
+                img = laplace(img)
+                filtered_planes[i, :, :] = torch.from_numpy(img)
+        else:
+            filtered_planes = filter_for_peaks(
+                planes,
+                self.bin_kernel,
+                self.gauss_kernel,
+                self.lap_kernel,
+                self.torch_device,
+            )
         normalize(filtered_planes, self.clipping_value)
         return filtered_planes
