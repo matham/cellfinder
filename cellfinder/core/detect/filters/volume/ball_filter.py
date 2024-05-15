@@ -162,9 +162,11 @@ class BallFilter:
         self.kernel_z_size = self.ball_z_size
 
         # convert to right type and pin for faster copying
-        kernel = (
-            torch.from_numpy(kernel).type(getattr(torch, dtype)).pin_memory()
-        )
+        kernel = torch.from_numpy(kernel).type(getattr(torch, dtype))
+        if torch_device != "cpu":
+            # torch at one point threw a cuda memory error when splitting cells
+            # on cpu due to pinning. It's best to only pin on using cuda
+            kernel.pin_memory()
         # add 2 dimensions at the start so we have 11ZYX We need this shape in
         # the conv step
         self.kernel = (
