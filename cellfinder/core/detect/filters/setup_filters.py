@@ -11,9 +11,9 @@ from cellfinder.core.tools.tools import (
 )
 
 # as seen in the benchmarks in the original PR, when running on CPU using
-# more than ~36 cores it starts to result in slowdowns. So limit to 32 cores
+# more than ~12 cores it starts to result in slowdowns. So limit to 12 cores
 # when doing computational work (e.g. torch.functional.Conv2D)
-MAX_TORCH_COMP_THREADS = 32
+MAX_TORCH_COMP_THREADS = 12
 
 
 @dataclass
