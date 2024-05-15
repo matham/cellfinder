@@ -2,7 +2,7 @@ import math
 import multiprocessing as mp
 import os
 from functools import partial
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -35,18 +35,33 @@ def _plane_filter(
     process: ProcessWithException,
     tile_processor: TileProcessor,
     n_threads: int,
+    buffers: List[Tuple[torch.Tensor, torch.Tensor]],
 ):
-    torch.set_num_threads(n_threads)
+    """
+    When running on cpu, we spin up a process for each plane in the batch.
+    This function runs in the process.
+
+    For every new batch, main process sends a buffer token and plane index
+    to this function. We process that plane and let the main process know
+    we are done.
+    """
+    # more than about 4 threads seems to slow down computation
+    torch.set_num_threads(min(n_threads, 4))
 
     while True:
         msg = process.get_msg_from_mainthread()
         if msg == EOFSignal:
             return
-        tensor, masks, i = msg
+        # with torch multiprocessing, tensors are shared in memory - so
+        # just update in place
+        token, i = msg
+        tensor, masks = buffers[token]
 
         plane, mask = tile_processor.get_tile_mask(tensor[i : i + 1, :, :])
         tensor[i : i + 1, :, :] = plane
         masks[i : i + 1, :, :] = mask
+
+        # tell the main thread we processed all the planes for this tensor
         process.send_msg_to_mainthread(None)
 
 
@@ -101,42 +116,72 @@ class VolumeFilter:
             self.ball_filter.num_batches_before_ready,
         )
 
+    def _get_filter_buffers(
+        self, cpu: bool, tile_processor: TileProcessor
+    ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Generates buffers to use for data loading and filtering.
+
+        It creates pinned tensors ahead of time for faster copying to gpu.
+        Pinned tensors are kept in RAM and are faster to copy to GPU because
+        they can't be paged. So loaded data is copied to the tensor and then
+        sent to the device.
+
+        For CPU even though we don't pin, it's useful to create the buffers
+        ahead of time and reuse it so we can filter in sub-processes
+        (see `_plane_filter`).
+        For tile masks, we only create buffers for CPU. On CUDA, they are
+        generated every time new on the device.
+        """
+        batch_size = self.settings.batch_size
+        torch_dtype = getattr(torch, self.settings.filtering_dtype)
+
+        buffers = []
+        for _ in range(self.n_queue_buffer):
+            # the tensor used for data loading
+            tensor = torch.empty(
+                (batch_size, *self.settings.plane_shape),
+                dtype=torch_dtype,
+                pin_memory=not cpu,
+                device="cpu",
+            )
+
+            # tile mask buffer - only for cpu
+            masks = None
+            if cpu:
+                masks = tile_processor.get_tiled_buffer(
+                    batch_size, self.settings.torch_device
+                )
+
+            buffers.append((tensor, masks))
+
+        return buffers
+
     @inference_wrapper
     def _feed_signal_batches(
         self,
         thread: ThreadWithException,
         data: types.array,
-        tile_processor: TileProcessor,
         processors: List[ProcessWithException],
+        buffers: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> None:
         """
         Runs in its own thread. It loads the input data planes, converts them
-        to torch tensors of the right data-type, and sends them to the main
-        thread to be filtered etc.
+        to torch tensors of the right data-type, and sends them to cuda or to
+        subprocesses for cpu to be filtered etc.
         """
         batch_size = self.settings.batch_size
-        plane_shape = self.settings.plane_shape
         device = self.settings.torch_device
         start_plane = self.settings.start_plane
         end_plane = start_plane + self.settings.n_planes
         data_converter = self.settings.filter_data_converter_func
-        torch_dtype = getattr(torch, self.settings.filtering_dtype)
+        cpu = self.settings.torch_device == "cpu"
+        # should only have 2d filter processors on the cpu
+        assert bool(processors) == cpu
 
-        # create pinned tensors ahead of time for faster copying to gpu.
-        # Pinned tensors are kept in RAM and are faster to copy to GPU because
-        # they can't be paged.
-        # we re-use these tensors for data loading, so we have a fixed number
-        # of planes in memory. This thread will wait to load more data until
-        # a tensor is free to be reused
-        for _ in range(self.n_queue_buffer):
-            empty = torch.empty(
-                (batch_size, *plane_shape),
-                dtype=torch_dtype,
-                pin_memory=True,
-                device="cpu",
-            )
-            # these tensors are free so send it to ourself
-            thread.send_msg_to_thread(empty)
+        # seed the queue with tokens for the buffers
+        for token in range(len(buffers)):
+            thread.send_msg_to_thread(token)
 
         for z in range(start_plane, end_plane, batch_size):
             # convert the data to the right type
@@ -147,31 +192,35 @@ class VolumeFilter:
                 return
 
             # thread/underlying queues get first crack at msg. Unless we get
-            # eof, this will block until a tensor is returned from the main
+            # eof, this will block until a buffer is returned from the main
             # thread for reuse
-            tensor = thread.get_msg_from_mainthread()
-            if tensor is EOFSignal:
+            token = thread.get_msg_from_mainthread()
+            if token is EOFSignal:
                 return
+
+            # buffer is free, get it from token
+            tensor, masks = buffers[token]
 
             # for last batch, it can be smaller than normal so only set up to n
             tensor[:n, :, :] = torch.from_numpy(np_data)
-            # send to device - it won't block here because we pinned memory
-            tensor_dev = tensor[:n, :, :].to(device=device, non_blocking=True)
+            tensor = tensor[:n, :, :]
+            if not cpu:
+                # send to device - it won't block here because we pinned memory
+                tensor = tensor.to(device=device, non_blocking=True)
 
+            # if used, send each plane in batch to processor
             used_processors = []
-            masks = None
-            if processors:
-                masks = tile_processor.get_tiled_buffer(n, device)
+            if cpu:
                 used_processors = processors[:n]
                 for i, process in enumerate(used_processors):
-                    process.send_msg_to_thread((tensor_dev, masks, i))
+                    process.send_msg_to_thread((token, i))
 
-            msg = tensor, tensor_dev, masks, used_processors
+            # tell the main thread to wait for processors (if used)
+            msg = token, tensor, masks, used_processors, n
 
             if n < batch_size:
-                # or last batch, we are also done after this
+                # on last batch, we are also done after this
                 thread.send_msg_to_mainthread(msg)
-                # we're done
                 return
             # send the data to the main thread
             thread.send_msg_to_mainthread(msg)
@@ -197,27 +246,34 @@ class VolumeFilter:
         cpu = self.settings.torch_device == "cpu"
         n_threads = self.settings.n_torch_comp_threads
 
-        # processes
+        # we re-use these tensors for data loading, so we have a fixed number
+        # of planes in memory. The feeder thread will wait to load more data
+        # until a tensor is free to be reused.
+        # We have to keep the tensors in memory in main process while it's
+        # in used elsewhere
+        buffers = self._get_filter_buffers(cpu, tile_processor)
+
+        # on cpu these processes will 2d filter each plane in the batch
         plane_processes = []
         if cpu:
             for _ in range(self.settings.batch_size):
                 process = ProcessWithException(
                     target=_plane_filter,
-                    args=(tile_processor, n_threads),
+                    args=(tile_processor, n_threads, buffers),
                     pass_self=True,
                 )
                 process.start()
                 plane_processes.append(process)
 
-        # thread that loads and sends us data
+        # thread that reads and sends us data
         feed_thread = ThreadWithException(
             target=self._feed_signal_batches,
-            args=(signal_array, tile_processor, plane_processes),
+            args=(signal_array, plane_processes, buffers),
             pass_self=True,
         )
         feed_thread.start()
 
-        # thread that takes the filtered data and does cell detection
+        # thread that takes the 3d filtered data and does cell detection
         cells_thread = ThreadWithException(
             target=self._run_filter_thread,
             args=(callback, progress_bar),
@@ -250,25 +306,36 @@ class VolumeFilter:
         tile_processor: TileProcessor,
         cpu: bool,
     ) -> None:
-        processing_tensors = []
+        """
+        Processes the loaded data from feeder thread. If on cpu it is already
+        2d filtered so just 3d filter. On cuda we need to do both 2d and 3d
+        filtering. Then, it sends the filtered data off to the detection thread
+        for cell detection.
+        """
+        processing_tokens = []
+
         while True:
             # thread/underlying queues get first crack at msg. Unless we
             # get eof, this will block until we get more loaded data
             msg = feed_thread.get_msg_from_thread()
+            # feeder thread exits at the end, causing a eof to be sent
             if msg is EOFSignal:
                 break
-            tensor, tensor_dev, masks, used_processors = msg
-            processing_tensors.append(tensor)
+            token, tensor, masks, used_processors, n = msg
+            # this token is in use until we return it
+            processing_tokens.append(token)
 
             if cpu:
                 # we did 2d filtering in different process
-                planes = tensor_dev
-                # make sure all the planes in the tensor are done filtering
+                # make sure all the planes are done filtering
                 for process in used_processors:
                     process.get_msg_from_thread()
+                # batch size can change at the end so resize buffer
+                planes = tensor[:n, :, :]
+                masks = masks[:n, :, :]
             else:
                 # we're not doing 2d filtering in different process
-                planes, masks = tile_processor.get_tile_mask(tensor_dev)
+                planes, masks = tile_processor.get_tile_mask(tensor)
 
             self.ball_filter.append(planes, masks)
             if self.ball_filter.ready:
@@ -277,9 +344,9 @@ class VolumeFilter:
 
                 # at this point we know input tensor can be reused - return
                 # it so feeder thread can load more data into it
-                for tensor in processing_tensors:
-                    feed_thread.send_msg_to_thread(tensor)
-                processing_tensors.clear()
+                for token in processing_tokens:
+                    feed_thread.send_msg_to_thread(token)
+                processing_tokens.clear()
 
                 # thread/underlying queues get first crack at msg. Unless
                 # we get eof, this will block until we get a token,
