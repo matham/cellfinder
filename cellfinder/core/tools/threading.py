@@ -82,11 +82,12 @@ class ProcessWithException(ExceptionWithQueueMixIn):
 
     def __init__(self, target, args=(), **kwargs):
         super().__init__(target=target, **kwargs)
-        self.to_thread_queue = mp.Queue(maxsize=0)
-        self.from_thread_queue = mp.Queue(maxsize=0)
-        self.args = args
         ctx = mp.get_context("spawn")
+        self.to_thread_queue = ctx.Queue(maxsize=0)
+        self.from_thread_queue = ctx.Queue(maxsize=0)
         self.process = ctx.Process(target=self.user_func_runner)
+
+        self.args = args
 
     def start(self):
         self.process.start()
