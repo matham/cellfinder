@@ -45,26 +45,26 @@ class DetectionSettings:
     n_iter (int): The number of iterations to perform. Default is 10.
     """
 
-    plane_shape: Tuple[int, int]
-    plane_original_np_dtype: np.dtype
-    filtering_dtype: str
+    plane_shape: Tuple[int, int] = (1, 1)
+    plane_original_np_dtype: np.dtype = np.uint16
+    filtering_dtype: str = "float32"
 
-    voxel_sizes: Tuple[float, float, float]
-    soma_spread_factor: float
-    soma_diameter_um: float
-    max_cluster_size_um3: float
-    ball_xy_size_um: float
-    ball_z_size_um: float
+    voxel_sizes: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+    soma_spread_factor: float = 1.0
+    soma_diameter_um: float = 1.0
+    max_cluster_size_um3: float = 1.0
+    ball_xy_size_um: float = 1.0
+    ball_z_size_um: float = 1.0
 
-    start_plane: int
-    end_plane: int
-    n_planes: int
+    start_plane: int = 0
+    end_plane: int = 1
+    n_planes: int = 1
 
-    n_free_cpus: int
+    n_free_cpus: int = 1
 
-    ball_overlap_fraction: float
-    log_sigma_size: float
-    n_sds_above_mean_thresh: float
+    ball_overlap_fraction: float = 0.5
+    log_sigma_size: float = 1.0
+    n_sds_above_mean_thresh: float = 1.0
 
     outlier_keep: bool = False
     artifact_keep: bool = False

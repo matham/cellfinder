@@ -8,6 +8,10 @@ class EOFSignal:
     pass
 
 
+class ExecutionFailure(Exception):
+    pass
+
+
 class ExceptionWithQueueMixIn:
 
     to_thread_queue: Queue
@@ -42,7 +46,9 @@ class ExceptionWithQueueMixIn:
         if msg == "eof":
             return EOFSignal
         if msg == "exception":
-            raise Exception("Processing signal data failed") from value
+            raise ExecutionFailure(
+                "Reporting failure from other thread/process"
+            ) from value
 
         return value
 

@@ -4,18 +4,20 @@ from typing import Dict, Optional, Tuple, TypeVar, Union
 import numba.typed
 import numpy as np
 import numpy.typing as npt
-from numba import njit, typed
+from numba import njit, objmode, typed
 from numba.core import types
 from numba.experimental import jitclass
 from numba.types import DictType
+
+from cellfinder.core.tools.tools import get_max_possible_int_value
 
 T = TypeVar("T")
 # type used for the domain of the volume - the size of the vol
 vol_np_type = np.int64
 vol_numba_type = types.int64
 # type used for the structure id
-sid_np_type = np.int64
-sid_numba_type = types.int64
+sid_np_type = np.uint64
+sid_numba_type = types.uint64
 
 
 @dataclass
@@ -26,14 +28,17 @@ class Point:
 
 
 @njit
-def get_non_zero_dtype_min(values: np.ndarray) -> int:
+def get_non_zero_dtype_min(values: np.ndarray) -> sid_numba_type:
     """
     Get the minimum of non-zero entries in *values*.
 
     If all entries are zero, returns maximum storeable number
     in the values array.
     """
-    min_val = np.iinfo(values.dtype).max
+    # we don't know how big the int is, so make it as large as possible (64)
+    with objmode(min_val="u8"):
+        min_val = get_max_possible_int_value(values.dtype)
+
     for v in values:
         if v != 0 and v < min_val:
             min_val = v
@@ -97,7 +102,7 @@ list_of_points_type = types.ListType(tuple_point_type)
 spec = [
     ("z", vol_numba_type),
     ("next_structure_id", sid_numba_type),
-    ("soma_centre_value", types.uint64),  # as large as possible
+    ("soma_centre_value", sid_numba_type),  # as large as possible
     ("shape", types.UniTuple(vol_numba_type, 2)),
     ("obsolete_ids", DictType(sid_numba_type, sid_numba_type)),
     ("coords_maps", DictType(sid_numba_type, list_of_points_type)),
@@ -135,7 +140,11 @@ class CellDetector:
     """
 
     def __init__(
-        self, height: int, width: int, start_z: int, soma_centre_value: int
+        self,
+        height: int,
+        width: int,
+        start_z: int,
+        soma_centre_value: sid_numba_type,
     ):
         """
         Parameters
@@ -159,6 +168,13 @@ class CellDetector:
         self.coords_maps = numba.typed.Dict.empty(
             key_type=sid_numba_type, value_type=list_of_points_type
         )
+
+    def _set_soma(self, soma_centre_value: sid_numba_type):
+        # Due to https://github.com/numba/numba/issues/9576. For testing we try
+        # different data types. Because of that issue we cannot pass a uint64
+        # soma_centre_value to constructor after we pass a uint32. This is the
+        # only way for now until numba fixes the issue
+        self.soma_centre_value = soma_centre_value
 
     def process(
         self, plane: np.ndarray, previous_plane: Optional[np.ndarray]
@@ -224,7 +240,7 @@ class CellDetector:
         """
         return self.structures_to_cells()
 
-    def get_structures(self) -> Dict[int, np.ndarray]:
+    def get_structures(self) -> Dict[sid_numba_type, np.ndarray]:
         """
         Gets the structures as a dict of structure IDs mapped to the 2D array
         of structure points (points vs x, y, z columns).
@@ -243,7 +259,7 @@ class CellDetector:
         return d
 
     def add_point(
-        self, sid: int, point: Union[tuple, list, np.ndarray]
+        self, sid: sid_numba_type, point: Union[tuple, list, np.ndarray]
     ) -> None:
         """
         Add single 3d (x, y, z) *point* to the structure with the given *sid*.
@@ -266,13 +282,15 @@ class CellDetector:
         for point in pts:
             append((point[0], point[1], point[2]))
 
-    def _add_point(self, sid: int, point: Tuple[int, int, int]) -> None:
+    def _add_point(
+        self, sid: sid_numba_type, point: Tuple[int, int, int]
+    ) -> None:
         # sid must exist
         self.coords_maps[sid].append(point)
 
     def add(
         self, x: int, y: int, z: int, neighbour_ids: npt.NDArray[sid_np_type]
-    ) -> int:
+    ) -> sid_numba_type:
         """
         For the current coordinates takes all the neighbours and find the
         minimum structure including obsolete structures mapping to any of
@@ -294,7 +312,9 @@ class CellDetector:
         self._add_point(updated_id, (int(x), int(y), int(z)))
         return updated_id
 
-    def sanitise_ids(self, neighbour_ids: npt.NDArray[sid_np_type]) -> int:
+    def sanitise_ids(
+        self, neighbour_ids: npt.NDArray[sid_np_type]
+    ) -> sid_numba_type:
         """
         Get the smallest ID of all the structures that are connected to IDs
         in `neighbour_ids`.
@@ -307,15 +327,17 @@ class CellDetector:
         """
         for i, neighbour_id in enumerate(neighbour_ids):
             # walk up the chain of obsolescence
-            neighbour_id = int(traverse_dict(self.obsolete_ids, neighbour_id))
+            neighbour_id = traverse_dict(self.obsolete_ids, neighbour_id)
             neighbour_ids[i] = neighbour_id
 
         # Get minimum of all non-obsolete IDs
         updated_id = get_non_zero_dtype_min(neighbour_ids)
-        return int(updated_id)
+        return updated_id
 
     def merge_structures(
-        self, updated_id: int, neighbour_ids: npt.NDArray[sid_np_type]
+        self,
+        updated_id: sid_numba_type,
+        neighbour_ids: npt.NDArray[sid_np_type],
     ) -> None:
         """
         For all the neighbours, reassign all the points of neighbour to
