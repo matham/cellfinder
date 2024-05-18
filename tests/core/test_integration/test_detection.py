@@ -4,6 +4,7 @@ from math import isclose
 import brainglobe_utils.IO.cells as cell_io
 import numpy as np
 import pytest
+from brainglobe_utils.cells.cells import Cell
 from brainglobe_utils.general.system import get_num_processes
 from brainglobe_utils.IO.image.load import read_with_dask
 
@@ -174,3 +175,30 @@ def test_data_dimension_error(ndim):
 
     with pytest.raises(ValueError, match="Input data must be 3D"):
         main(signal_array, background_array, voxel_sizes)
+
+
+@pytest.mark.parametrize("device", ["cuda", "cpu"])
+@pytest.mark.parametrize(
+    "dtype", [np.uint8, np.uint16, np.uint32, np.float32, np.float64]
+)
+def test_signal_data_types(synthetic_single_spot, no_free_cpus, dtype, device):
+    import torch
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.xfail("Cuda is not available")
+
+    signal_array, background_array, center = synthetic_single_spot
+    signal_array = signal_array.astype(dtype)
+    background_array = background_array.astype(dtype)
+    detected = main(
+        signal_array,
+        background_array,
+        n_sds_above_mean_thresh=1.0,
+        voxel_sizes=voxel_sizes,
+        n_free_cpus=no_free_cpus,
+        skip_classification=True,
+        classification_torch_device=device,
+    )
+
+    assert len(detected) == 1
+    assert detected[0] == Cell(center, Cell.UNKNOWN)

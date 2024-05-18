@@ -1,10 +1,10 @@
 import numpy as np
 import pytest
 
-from cellfinder.core.detect.filters.setup_filters import DetectionSettings
 from cellfinder.core.detect.filters.volume.structure_detection import (
     CellDetector,
 )
+from cellfinder.core.tools.tools import get_max_possible_int_value
 
 
 @pytest.mark.parametrize(
@@ -37,22 +37,12 @@ def test_connect_four_limits(linear_size: int, datatype: np.dtype) -> None:
     * there is exactly one structure with the maximum id...
     * ...and that structure is in the expected place (top-right pixel)
     """
-    # the input/filtering and detection data types are all the same because
-    # they are ints
-    settings = DetectionSettings(
-        plane_shape=(linear_size * 2, linear_size),
-        plane_original_np_dtype=datatype,
-        filtering_dtype=datatype.__name__,
-    )
-    assert settings.detection_dtype == datatype, (
-        "If input and filtering datatypes are the same and are int, the "
-        "detection type should also be int"
-    )
-    height = settings.plane_height
-    width = settings.plane_width
-    soma_centre_value = settings.soma_centre_value
+    height = linear_size * 2
+    width = linear_size
+    # use a very large value - similar to how it is normally used
+    soma_centre_value = get_max_possible_int_value(datatype)
 
-    checkerboard = np.zeros(settings.plane_shape, dtype=datatype)
+    checkerboard = np.zeros((height, width), dtype=datatype)
     i = np.arange(height)[:, np.newaxis]  # rows
     j = np.arange(width)[np.newaxis, :]  # cols
     checkerboard[(i + j) % 2 == 0] = soma_centre_value

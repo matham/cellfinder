@@ -49,13 +49,16 @@ def test_main_bad_signal_arg(mocked_main):
     with pytest.raises(ValueError):
         call_main(signal_array=np.empty((1, 1)))
 
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         call_main(signal_array=np.empty((1, 1, 1), dtype=np.str_))
+
+    with pytest.raises(TypeError):
+        call_main(signal_array=np.empty((1, 1, 1), dtype=np.uint64))
 
 
 @pytest.mark.parametrize(
     "dtype",
-    [np.uint8, np.uint16, np.uint32, np.uint64, np.float32, np.float64],
+    [np.uint8, np.uint16, np.uint32, np.float32, np.float64],
 )
 def test_main_good_signal_arg(mocked_main, dtype):
     call_main(signal_array=np.empty((1, 1, 1)))
@@ -64,7 +67,7 @@ def test_main_good_signal_arg(mocked_main, dtype):
 def test_main_bad_or_default_args(mocked_main):
     process, get_results = mocked_main
     call_main(
-        signal_array=np.empty((5, 8, 19), dtype=np.uint32),
+        signal_array=np.empty((5, 8, 19), dtype=np.uint16),
         end_plane=-1,
         batch_size=None,
         torch_device="cpu",
@@ -80,8 +83,10 @@ def test_main_bad_or_default_args(mocked_main):
     settings = vol_filter.settings
 
     assert settings.plane_shape == (8, 19)
-    assert settings.plane_original_np_dtype == np.uint32
-    assert settings.filtering_dtype == "float32"
+    assert settings.plane_original_np_dtype == np.uint16
+    # for uint16 input we should use float32
+    assert settings.filtering_dtype == np.float32
+    assert settings.detection_dtype == np.uint32
     assert settings.end_plane == 5
     assert settings.n_planes == 5
     assert settings.batch_size == 4  # cpu default is 4

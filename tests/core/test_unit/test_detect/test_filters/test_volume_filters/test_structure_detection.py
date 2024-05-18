@@ -150,14 +150,21 @@ def test_detection(
     pixels: List[Tuple[int, int, int]],
     expected_coords: Dict[int, List[Point]],
 ) -> None:
-    # original/filtering data type is given type (representing the data type
-    # used during ball filtering). detection_dtype is the type
-    # that must be used during detection to fit the values used during
-    # filtering (i.e. settings.soma_centre_value)
-    settings = DetectionSettings(
-        plane_original_np_dtype=dtype,
-        filtering_dtype=dtype.__name__,
-    )
+    # original dtype is the dtype of the original data. filtering_dtype
+    # is the data type used during ball filtering. Currently, it can be at most
+    # float64. So original dtype cannot support 64-bits because it won't fit in
+    # float64.
+    # detection_dtype is the type that must be used during detection to fit the
+    # values used during filtering (i.e. settings.soma_centre_value)
+    settings = DetectionSettings(plane_original_np_dtype=dtype)
+
+    if dtype == np.uint64:
+        with pytest.raises(TypeError):
+            # should raise error for uint64 - too big for float64
+            filtering_dtype = settings.filtering_dtype
+            # do something with it so linter doesn't complain
+            assert filtering_dtype
+        return
 
     data = np.zeros((depth, height, width)).astype(settings.detection_dtype)
     detector = CellDetector(height, width, 0, 0)

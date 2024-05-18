@@ -85,3 +85,37 @@ def synthetic_bright_spots() -> Tuple[np.ndarray, np.ndarray]:
     background_array = np.zeros_like(signal_array)
 
     return signal_array, background_array
+
+
+@pytest.fixture(scope="session")
+def synthetic_single_spot() -> (
+    Tuple[np.ndarray, np.ndarray, Tuple[int, int, int]]
+):
+    """
+    Creates a synthetic signal array with a single spherical spot
+    in a 3d numpy array to be used for cell detection testing.
+
+    The max value is 100 and min is zero. The array is a floating type.
+    You must convert it to the right data type for your tests.
+    Also, `n_sds_above_mean_thresh` must be 1 or larger.
+    """
+    shape_zyx = 20, 50, 50
+    r = 2
+    c_xyz = 25, 25, 10
+
+    signal_array = np.zeros(shape_zyx)
+    background_array = np.zeros_like(signal_array)
+
+    z, y, x = np.mgrid[
+        0 : shape_zyx[0] : 1, 0 : shape_zyx[1] : 1, 0 : shape_zyx[2] : 1
+    ]
+    dist = np.sqrt(
+        (x - c_xyz[0]) ** 2 + (y - c_xyz[1]) ** 2 + (z - c_xyz[2]) ** 2
+    )
+    # 100 seems to be the right size so std is not too small for filters
+    signal_array[dist <= r] = 100
+
+    # 1 std should be larger, so it can be considered bright
+    assert np.mean(signal_array) + np.std(signal_array) > 1
+
+    return signal_array, background_array, c_xyz

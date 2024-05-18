@@ -140,7 +140,7 @@ def main(
             batch_size = 1
 
     if not np.issubdtype(signal_array.dtype, np.number):
-        raise ValueError(
+        raise TypeError(
             "signal_array must be a numpy datatype, but has datatype "
             f"{signal_array.dtype}"
         )
@@ -152,16 +152,12 @@ def main(
         end_plane = len(signal_array)
     n_planes = max(min(len(signal_array), end_plane) - start_plane, 0)
 
-    # pytorch requires floats for many operations, we can use float64,
-    # but it's slower
-    filtering_dtype = "float32"
     torch_device = torch_device.lower()
     batch_size = max(batch_size, 1)
 
     settings = DetectionSettings(
         plane_shape=signal_array.shape[1:],
         plane_original_np_dtype=signal_array.dtype,
-        filtering_dtype=filtering_dtype,
         voxel_sizes=voxel_sizes,
         soma_spread_factor=soma_spread_factor,
         soma_diameter_um=soma_diameter,
@@ -205,7 +201,7 @@ def main(
         log_sigma_size=log_sigma_size,
         soma_diameter=settings.soma_diameter,
         torch_device=torch_device,
-        dtype=settings.filtering_dtype,
+        dtype=settings.filtering_dtype.__name__,
         use_scipy=use_scipy,
     )
 

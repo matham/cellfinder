@@ -55,8 +55,8 @@ def get_data_converter(
     src_dtype : np.dtype
         The data-type of the input data.
     dest_dtype : np.dtype
-        The data-type of the returned data. Currently it must be a floating
-        type (e.g. `np.float32`, `np.float64`).
+        The data-type of the returned data. Currently, it must be a floating
+        type and `np.float32` or `np.float64`.
 
     Returns
     -------
@@ -64,9 +64,12 @@ def get_data_converter(
         A function that takes a single input data parameter and returns
         the converted data.
     """
-    if not np.issubdtype(dest_dtype, np.floating):
+    if not np.issubdtype(dest_dtype, np.float32) and not np.issubdtype(
+        dest_dtype, np.float64
+    ):
         raise ValueError(
-            f"Destination dtype must be a floating type, but is {dest_dtype}"
+            f"Destination dtype must be a float32 or float64, "
+            f"but it is {dest_dtype}"
         )
 
     in_max = get_max_possible_int_value(src_dtype)

@@ -93,7 +93,7 @@ class VolumeFilter:
             soma_centre_value=settings.soma_centre_value,
             tile_height=settings.tile_height,
             tile_width=settings.tile_width,
-            dtype=settings.filtering_dtype,
+            dtype=settings.filtering_dtype.__name__,
             batch_size=settings.batch_size,
             torch_device=settings.torch_device,
             use_mask=True,
@@ -134,7 +134,7 @@ class VolumeFilter:
         generated every time new on the device.
         """
         batch_size = self.settings.batch_size
-        torch_dtype = getattr(torch, self.settings.filtering_dtype)
+        torch_dtype = getattr(torch, self.settings.filtering_dtype.__name__)
 
         buffers = []
         for _ in range(self.n_queue_buffer):

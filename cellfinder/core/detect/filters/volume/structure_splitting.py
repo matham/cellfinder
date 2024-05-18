@@ -101,7 +101,7 @@ def ball_filter_imgs(
             soma_centre_value=settings.soma_centre_value,
             tile_height=settings.tile_height,
             tile_width=settings.tile_width,
-            dtype=settings.filtering_dtype,
+            dtype=settings.filtering_dtype.__name__,
             batch_size=batch_size,
             torch_device=settings.torch_device,
             use_mask=False,  # we don't need a mask here
@@ -242,7 +242,7 @@ def split_cells(
     original_bounding_cuboid_shape = get_shape(xs, ys, zs)
 
     ball_radius = settings.ball_xy_size // 2
-    dtype = getattr(torch, settings.filtering_dtype)
+    dtype = getattr(torch, settings.filtering_dtype.__name__)
     # volume is now z, y, x order
     vol = coords_to_volume(
         xs,

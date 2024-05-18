@@ -47,7 +47,6 @@ class DetectionSettings:
 
     plane_shape: Tuple[int, int] = (1, 1)
     plane_original_np_dtype: np.dtype = np.uint16
-    filtering_dtype: str = "float32"
 
     voxel_sizes: Tuple[float, float, float] = (1.0, 1.0, 1.0)
     soma_spread_factor: float = 1.0
@@ -88,14 +87,28 @@ class DetectionSettings:
         return d
 
     @cached_property
+    def filtering_dtype(self) -> np.dtype:
+        original_dtype = self.plane_original_np_dtype
+        original_max_int = get_max_possible_int_value(original_dtype)
+
+        # does original data fit in float32
+        if original_max_int <= get_max_possible_int_value(np.float32):
+            return np.float32
+        # what about float64
+        if original_max_int <= get_max_possible_int_value(np.float64):
+            return np.float64
+        raise TypeError("Input array data type is too big for a float64")
+
+    @cached_property
     def filter_data_converter_func(self) -> Callable[[np.ndarray], np.ndarray]:
         return get_data_converter(
-            self.plane_original_np_dtype, getattr(np, self.filtering_dtype)
+            self.plane_original_np_dtype, self.filtering_dtype
         )
 
     @cached_property
     def detection_dtype(self) -> np.dtype:
-        working_dtype = getattr(np, self.filtering_dtype)
+        working_dtype = self.filtering_dtype
+        # filtering type is at most float64. So it'll always fit in uint64
         if np.issubdtype(working_dtype, np.integer):
             # already integer, return it
             return working_dtype
@@ -107,19 +120,15 @@ class DetectionSettings:
 
     @cached_property
     def clipping_value(self) -> int:
-        return (
-            get_max_possible_int_value(getattr(np, self.filtering_dtype)) - 2
-        )
+        return get_max_possible_int_value(self.filtering_dtype) - 2
 
     @cached_property
     def threshold_value(self) -> int:
-        return (
-            get_max_possible_int_value(getattr(np, self.filtering_dtype)) - 1
-        )
+        return get_max_possible_int_value(self.filtering_dtype) - 1
 
     @cached_property
     def soma_centre_value(self) -> int:
-        return get_max_possible_int_value(getattr(np, self.filtering_dtype))
+        return get_max_possible_int_value(self.filtering_dtype)
 
     @property
     def tile_height(self) -> int:
