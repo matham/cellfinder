@@ -469,11 +469,17 @@ class VolumeFilter:
         # parallel modifications for same object
         f = partial(_split_cells, settings=settings)
         ctx = mp.get_context("spawn")
-        with ctx.Pool(processes=root_settings.n_processes) as pool:
+        # we can't use the context manager because of coverage issues:
+        # https://pytest-cov.readthedocs.io/en/latest/subprocess-support.html
+        pool = ctx.Pool(processes=root_settings.n_processes)
+        try:
             for cell_centres in pool.imap_unordered(f, needs_split):
                 for cell_centre in cell_centres:
                     cells.append(Cell(cell_centre.tolist(), Cell.UNKNOWN))
                 progress_bar.update()
+        finally:
+            pool.close()
+            pool.join()
 
         progress_bar.close()
         logger.debug(
