@@ -8,6 +8,7 @@ from brainglobe_utils.cells.cells import Cell
 from brainglobe_utils.general.system import get_num_processes
 from brainglobe_utils.IO.image.load import read_with_dask
 
+from cellfinder.core.detect.detect import main as detect_main
 from cellfinder.core.main import main
 
 data_dir = os.path.join(
@@ -134,21 +135,20 @@ def test_callbacks(signal_array, background_array, no_free_cpus):
         classify_callback=classify_callback,
         detect_finished_callback=detect_finished_callback,
         n_free_cpus=no_free_cpus,
+        ball_z_size=15,
     )
 
-    np.testing.assert_equal(planes_done, np.arange(len(signal_array)))
+    skipped_planes = int(round(15 / voxel_sizes[0])) - 1
+    skip_start = skipped_planes // 2
+    skip_end = skipped_planes - skip_start
+    n = len(signal_array) - skip_end
+    np.testing.assert_equal(planes_done, np.arange(skip_start, n))
     np.testing.assert_equal(batches_classified, [0])
 
     ncalls = len(points_found)
     assert ncalls == 1, f"Expected 1 call to callback, got {ncalls}"
     npoints = len(points_found[0])
     assert npoints == 120, f"Expected 120 points, found {npoints}"
-
-
-def test_floating_point_error(signal_array, background_array):
-    signal_array = signal_array.astype(float)
-    with pytest.raises(ValueError, match="signal_array must be integer"):
-        main(signal_array, background_array, voxel_sizes)
 
 
 def test_synthetic_data(synthetic_bright_spots, no_free_cpus):
@@ -179,7 +179,17 @@ def test_data_dimension_error(ndim):
 
 @pytest.mark.parametrize("device", ["cuda", "cpu"])
 @pytest.mark.parametrize(
-    "dtype", [np.uint8, np.uint16, np.uint32, np.float32, np.float64]
+    "dtype",
+    [
+        np.uint8,
+        np.uint16,
+        np.uint32,
+        np.int8,
+        np.int16,
+        np.int32,
+        np.float32,
+        np.float64,
+    ],
 )
 def test_signal_data_types(synthetic_single_spot, no_free_cpus, dtype, device):
     import torch
@@ -189,6 +199,13 @@ def test_signal_data_types(synthetic_single_spot, no_free_cpus, dtype, device):
 
     signal_array, background_array, center = synthetic_single_spot
     signal_array = signal_array.astype(dtype)
+    # for signed ints, make some data negative
+    if np.issubdtype(dtype, np.signedinteger):
+        # min of signal_array is zero
+        assert np.isclose(0, np.min(signal_array))
+        shift = (np.max(signal_array) - np.min(signal_array)) // 2
+        signal_array = signal_array - shift
+
     background_array = background_array.astype(dtype)
     detected = main(
         signal_array,
@@ -202,3 +219,62 @@ def test_signal_data_types(synthetic_single_spot, no_free_cpus, dtype, device):
 
     assert len(detected) == 1
     assert detected[0] == Cell(center, Cell.UNKNOWN)
+
+
+@pytest.mark.parametrize("use_scipy", [True, False])
+@pytest.mark.parametrize("device", ["cuda", "cpu"])
+def test_detection_scipy_torch(
+    synthetic_single_spot, no_free_cpus, use_scipy, device
+):
+    import torch
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.xfail("Cuda is not available")
+
+    signal_array, background_array, center = synthetic_single_spot
+    signal_array = signal_array.astype(np.float32)
+
+    detected = detect_main(
+        signal_array,
+        n_sds_above_mean_thresh=1.0,
+        voxel_sizes=voxel_sizes,
+        n_free_cpus=no_free_cpus,
+        torch_device=device,
+        use_scipy=use_scipy,
+    )
+
+    assert len(detected) == 1
+    assert detected[0] == Cell(center, Cell.UNKNOWN)
+
+
+@pytest.mark.parametrize("device", ["cuda", "cpu"])
+def test_detection_cluster_splitting(
+    synthetic_spot_clusters, no_free_cpus, device
+):
+    """
+    Test cluster splitting for overlapping cells.
+
+    Test filtering/detection on cpu and cuda. Because splitting is only on cpu
+    so make sure if detection is on cuda, splitting still works.
+    """
+    import torch
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.xfail("Cuda is not available")
+
+    signal_array, background_array, centers_xyz = synthetic_spot_clusters
+    signal_array = signal_array.astype(np.float32)
+
+    detected = detect_main(
+        signal_array,
+        n_sds_above_mean_thresh=1.0,
+        voxel_sizes=voxel_sizes,
+        n_free_cpus=no_free_cpus,
+        torch_device=device,
+    )
+
+    assert len(detected) == len(centers_xyz)
+    for cell, center in zip(detected, centers_xyz):
+        p = [cell.x, cell.y, cell.z]
+        d = np.sqrt(np.sum(np.square(np.subtract(center, p))))
+        assert d <= 3

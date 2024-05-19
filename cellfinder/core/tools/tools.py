@@ -1,6 +1,6 @@
 from functools import wraps
 from random import getrandbits, uniform
-from typing import Callable, Optional
+from typing import Callable, Optional, Type
 
 import numpy as np
 import torch
@@ -21,7 +21,7 @@ def inference_wrapper(func):
     return inner_function
 
 
-def get_max_possible_int_value(dtype: np.dtype) -> int:
+def get_max_possible_int_value(dtype: Type[np.number]) -> int:
     """
     Returns the maximum allowed integer for a numpy array of given type.
 
@@ -38,8 +38,26 @@ def get_max_possible_int_value(dtype: np.dtype) -> int:
     raise ValueError("datatype must be of integer or floating data type")
 
 
+def get_min_possible_int_value(dtype: Type[np.number]) -> int:
+    """
+    Returns the minimum allowed integer for a numpy array of given type.
+
+    If dtype is of integer type, it's the minimum value. If it's a floating
+    type, it's the minimum integer that can be accurately represented.
+    E.g. for float32, only integers up to -2**24 can be represented (due to
+    the number of bits representing the mantissa (significand).
+    """
+    if np.issubdtype(dtype, np.integer):
+        return np.iinfo(dtype).min
+    if np.issubdtype(dtype, np.floating):
+        mant = np.finfo(dtype).nmant
+        # the sign bit is separate so we have the full mantissa for value
+        return -(2**mant)
+    raise ValueError("datatype must be of integer or floating data type")
+
+
 def get_data_converter(
-    src_dtype: np.dtype, dest_dtype: np.dtype
+    src_dtype: Type[np.number], dest_dtype: Type[np.floating]
 ) -> Callable[[np.ndarray], np.ndarray]:
     """
     Returns a function that can be called to convert one data-type to another,
@@ -72,19 +90,25 @@ def get_data_converter(
             f"but it is {dest_dtype}"
         )
 
+    in_min = get_min_possible_int_value(src_dtype)
     in_max = get_max_possible_int_value(src_dtype)
+    out_min = get_min_possible_int_value(dest_dtype)
     out_max = get_max_possible_int_value(dest_dtype)
+    in_abs_max = max(in_max, abs(in_min))
+    out_abs_max = max(out_max, abs(out_min))
 
     def unchanged(data: np.ndarray) -> np.ndarray:
         return np.asarray(data)
 
     def float_to_float_scale_down(data: np.ndarray) -> np.ndarray:
-        return ((np.asarray(data) / in_max) * out_max).astype(dest_dtype)
+        return ((np.asarray(data) / in_abs_max) * out_abs_max).astype(
+            dest_dtype
+        )
 
     def int_to_float_scale_down(data: np.ndarray) -> np.ndarray:
         # data must fit in float64
         data = np.asarray(data).astype(np.float64)
-        return ((data / in_max) * out_max).astype(dest_dtype)
+        return ((data / in_abs_max) * out_abs_max).astype(dest_dtype)
 
     def to_float_unscaled(data: np.ndarray) -> np.ndarray:
         return np.asarray(data).astype(dest_dtype)
@@ -92,21 +116,26 @@ def get_data_converter(
     if src_dtype == dest_dtype:
         return unchanged
 
+    # out can hold the largest in values - just convert to float
+    if out_min <= in_min < in_max <= out_max:
+        return to_float_unscaled
+
     # need to scale down before converting to float
-    if in_max > out_max:
-        if np.issubdtype(src_dtype, np.integer):
-            # int must fit in 64-bit float so we can temp store it there
-            if in_max > get_max_possible_int_value(np.float64):
-                raise ValueError(
-                    f"The input datatype {src_dtype} cannot fit in a "
-                    f"64-bit float"
-                )
-            return int_to_float_scale_down
+    if np.issubdtype(src_dtype, np.integer):
+        # if going to float32 and it didn't fit input must fit in 64-bit float
+        # so we can temp store it there to scale. If going to float64, same.
+        if in_max > get_max_possible_int_value(
+            np.float64
+        ) or in_min < get_min_possible_int_value(np.float64):
+            raise ValueError(
+                f"The input datatype {src_dtype} cannot fit in a "
+                f"64-bit float"
+            )
+        return int_to_float_scale_down
 
-        return float_to_float_scale_down
-
-    # it can hold the largest value, just convert to float
-    return to_float_unscaled
+    # for float input, however big it is, we can always scale it down in the
+    # input data type before changing type
+    return float_to_float_scale_down
 
 
 def union(a, b):

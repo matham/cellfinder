@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Tuple, Type
 
 import numpy as np
 import torch
@@ -37,7 +37,7 @@ def coords_to_volume(
     zs: np.ndarray,
     volume_shape: Tuple[int, int, int],
     ball_radius: int,
-    dtype: np.dtype,
+    dtype: Type[np.number],
     threshold_value: int,
 ) -> torch.Tensor:
     """
@@ -267,7 +267,6 @@ def split_cells(
     settings.plane_shape = vol.shape[1:]
     settings.start_plane = 0
     settings.end_plane = vol.shape[0]
-    settings.n_planes = settings.end_plane
     settings.batch_size = batch_size
 
     # centres is a list of arrays of centres (1 array of centres per ball run)

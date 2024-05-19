@@ -1,5 +1,5 @@
 import os
-from typing import Tuple
+from typing import List, Tuple
 
 import numpy as np
 import pytest
@@ -25,6 +25,23 @@ def set_device_arm_macos_ci():
         and torch.backends.mps.is_available()
     ):
         force_cpu()
+
+
+def mark_sphere(
+    data_zyx: np.ndarray, center_xyz, radius: int, fill_value: int
+) -> None:
+    shape_zyx = data_zyx.shape
+
+    z, y, x = np.mgrid[
+        0 : shape_zyx[0] : 1, 0 : shape_zyx[1] : 1, 0 : shape_zyx[2] : 1
+    ]
+    dist = np.sqrt(
+        (x - center_xyz[0]) ** 2
+        + (y - center_xyz[1]) ** 2
+        + (z - center_xyz[2]) ** 2
+    )
+    # 100 seems to be the right size so std is not too small for filters
+    data_zyx[dist <= radius] = fill_value
 
 
 @pytest.fixture(scope="session")
@@ -100,22 +117,46 @@ def synthetic_single_spot() -> (
     Also, `n_sds_above_mean_thresh` must be 1 or larger.
     """
     shape_zyx = 20, 50, 50
-    r = 2
     c_xyz = 25, 25, 10
 
     signal_array = np.zeros(shape_zyx)
     background_array = np.zeros_like(signal_array)
-
-    z, y, x = np.mgrid[
-        0 : shape_zyx[0] : 1, 0 : shape_zyx[1] : 1, 0 : shape_zyx[2] : 1
-    ]
-    dist = np.sqrt(
-        (x - c_xyz[0]) ** 2 + (y - c_xyz[1]) ** 2 + (z - c_xyz[2]) ** 2
-    )
-    # 100 seems to be the right size so std is not too small for filters
-    signal_array[dist <= r] = 100
+    mark_sphere(signal_array, center_xyz=c_xyz, radius=2, fill_value=100)
 
     # 1 std should be larger, so it can be considered bright
     assert np.mean(signal_array) + np.std(signal_array) > 1
 
     return signal_array, background_array, c_xyz
+
+
+@pytest.fixture(scope="session")
+def synthetic_spot_clusters() -> (
+    Tuple[np.ndarray, np.ndarray, List[Tuple[int, int, int]]]
+):
+    """
+    Creates a synthetic signal array with a 4 overlapping spherical spots
+    in a 3d numpy array to be used for cell cluster splitting testing.
+
+    The max value is 100 and min is zero. The array is a floating type.
+    You must convert it to the right data type for your tests.
+    Also, `n_sds_above_mean_thresh` must be 1 or larger.
+    """
+    shape_zyx = 20, 100, 100
+    radius = 5
+    s = 50 - radius * 4
+    centers_xyz = [
+        (s, 50, 10),
+        (s + 2 * radius - 1, 50, 10),
+        (s + 4 * radius - 2, 50, 10),
+        (s + 6 * radius - 3, 50, 10),
+    ]
+
+    signal_array = np.zeros(shape_zyx)
+    background_array = np.zeros_like(signal_array)
+
+    for center in centers_xyz:
+        mark_sphere(
+            signal_array, center_xyz=center, radius=radius, fill_value=100
+        )
+
+    return signal_array, background_array, centers_xyz

@@ -55,10 +55,22 @@ def test_main_bad_signal_arg(mocked_main):
     with pytest.raises(TypeError):
         call_main(signal_array=np.empty((1, 1, 1), dtype=np.uint64))
 
+    with pytest.raises(TypeError):
+        call_main(signal_array=np.empty((1, 1, 1), dtype=np.int64))
+
 
 @pytest.mark.parametrize(
     "dtype",
-    [np.uint8, np.uint16, np.uint32, np.float32, np.float64],
+    [
+        np.uint8,
+        np.uint16,
+        np.uint32,
+        np.int8,
+        np.int16,
+        np.int32,
+        np.float32,
+        np.float64,
+    ],
 )
 def test_main_good_signal_arg(mocked_main, dtype):
     call_main(signal_array=np.empty((1, 1, 1)))
@@ -111,7 +123,7 @@ def test_main_splitting_cpu_cuda(mocker: MockerFixture):
     # checks that even if main filtering runs on cuda, the structure splitting
     # only runs on cpu
     # patch anything that would do with cuda - in case there's no cuda
-    val: MagicMock = mocker.patch(
+    vol: MagicMock = mocker.patch(
         "cellfinder.core.detect.detect.VolumeFilter", autospec=True
     )
     mocker.patch("cellfinder.core.detect.detect.TileProcessor", autospec=True)
@@ -120,8 +132,8 @@ def test_main_splitting_cpu_cuda(mocker: MockerFixture):
         signal_array=np.empty((5, 8, 19)), batch_size=None, torch_device="cuda"
     )
 
-    settings = val.call_args.kwargs["settings"]
-    (splitting_settings,) = val.return_value.get_results.call_args.args
+    settings = vol.call_args.kwargs["settings"]
+    (splitting_settings,) = vol.return_value.get_results.call_args.args
 
     assert settings.torch_device == "cuda"
     assert settings.batch_size == 1  # cuda default is 1

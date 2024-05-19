@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Type
 
 import numpy as np
 import pytest
@@ -35,7 +35,7 @@ def coords_to_points(
         (np.float64, 2**52),
     ],
 )
-def test_get_non_zero_dtype_min(dtype: np.dtype, expected: int) -> None:
+def test_get_non_zero_dtype_min(dtype: Type[np.number], expected: int) -> None:
     assert get_non_zero_dtype_min(np.arange(10, dtype=dtype)) == 1
     assert get_non_zero_dtype_min(np.zeros(10, dtype=dtype)) == expected
 
@@ -139,34 +139,51 @@ test_data = [
 
 # Due to  https://github.com/numba/numba/issues/9576 we need to run np.uint64
 # before smaller sizes
-# we don't officially support float in cell detection, but it still works
+# we don't use floats in cell detection, but it works
 @pytest.mark.parametrize(
     "dtype",
-    [np.uint64, np.uint8, np.uint16, np.uint32, np.float32, np.float64],
+    [
+        np.uint64,
+        np.int64,
+        np.uint8,
+        np.int8,
+        np.uint16,
+        np.int16,
+        np.uint32,
+        np.int32,
+        np.float32,
+        np.float64,
+    ],
 )
 @pytest.mark.parametrize("pixels,expected_coords", test_data)
 def test_detection(
-    dtype: np.dtype,
+    dtype: Type[np.number],
     pixels: List[Tuple[int, int, int]],
     expected_coords: Dict[int, List[Point]],
 ) -> None:
     # original dtype is the dtype of the original data. filtering_dtype
     # is the data type used during ball filtering. Currently, it can be at most
-    # float64. So original dtype cannot support 64-bits because it won't fit in
-    # float64.
+    # float64. So original dtype cannot support 64-bit ints because it won't
+    # fit in float64.
     # detection_dtype is the type that must be used during detection to fit the
-    # values used during filtering (i.e. settings.soma_centre_value)
+    # values used during filtering (i.e. settings.soma_centre_value). It is
+    # unsigned (although the cell detection code actually does support
+    # float/signed).
     settings = DetectionSettings(plane_original_np_dtype=dtype)
 
-    if dtype == np.uint64:
+    if dtype in (np.uint64, np.int64):
         with pytest.raises(TypeError):
             # should raise error for uint64 - too big for float64
-            filtering_dtype = settings.filtering_dtype
-            # do something with it so linter doesn't complain
-            assert filtering_dtype
+            detection_dtype = settings.detection_dtype
+            # do something with so linter doesn't complain
+            assert detection_dtype
         return
 
-    data = np.zeros((depth, height, width)).astype(settings.detection_dtype)
+    detection_dtype = settings.detection_dtype
+    assert np.issubdtype(detection_dtype, np.unsignedinteger)
+
+    # pretend we got the data from filtering and converted to detection type
+    data = np.zeros((depth, height, width), dtype=settings.detection_dtype)
     detector = CellDetector(height, width, 0, 0)
     # similar to numba issue #9576 we can't pass to init a large value once
     # a 32 bit type was used for detector. So pass it with custom method

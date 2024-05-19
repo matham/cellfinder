@@ -130,6 +130,7 @@ setenv =
     KERAS_BACKEND = torch
 passenv =
     NUMBA_DISABLE_JIT
+    PYTORCH_JIT
     CI
     GITHUB_ACTIONS
     DISPLAY

@@ -106,3 +106,23 @@ def test_feeder_thread_batch(batch_size: int):
         torch_device="cpu",
         batch_size=batch_size,
     )
+
+
+def test_filtered_plane_range(mocker: MockerFixture):
+    # check that even if input data is negative, filtered data is positive
+    detector = mocker.patch(
+        "cellfinder.core.detect.filters.volume.volume_filter.CellDetector",
+        autospec=True,
+    )
+
+    # input data in range (-500, 500)
+    data = ((np.random.random((6, 50, 50)) - 0.5) * 1000).astype(np.float32)
+    call_main(signal_array=data)
+
+    calls = detector.return_value.process.call_args_list
+    assert len(calls)
+    for call in calls:
+        plane, *_ = call.args
+        # should have at least background and foreground pixels
+        assert len(np.unique(plane)) >= 2
+        assert np.min(plane) >= 0

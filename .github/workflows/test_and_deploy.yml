@@ -81,6 +81,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
        NUMBA_DISABLE_JIT: "1"
+       PYTORCH_JIT: "0"
 
     steps:
       - name: Cache brainglobe directory

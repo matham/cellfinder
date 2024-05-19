@@ -29,18 +29,18 @@ from cellfinder.core.detect.filters.volume.volume_filter import VolumeFilter
 
 def main(
     signal_array: types.array,
-    start_plane: int,
-    end_plane: int,
-    voxel_sizes: Tuple[float, float, float],
-    soma_diameter: float,
-    max_cluster_size: float,
-    ball_xy_size: float,
-    ball_z_size: float,
-    ball_overlap_fraction: float,
-    soma_spread_factor: float,
-    n_free_cpus: int,
-    log_sigma_size: float,
-    n_sds_above_mean_thresh: float,
+    start_plane: int = 0,
+    end_plane: int = -1,
+    voxel_sizes: Tuple[float, float, float] = (5, 2, 2),
+    soma_diameter: float = 16,
+    max_cluster_size: float = 100_000,
+    ball_xy_size: float = 6,
+    ball_z_size: float = 15,
+    ball_overlap_fraction: float = 0.6,
+    soma_spread_factor: float = 1.4,
+    n_free_cpus: int = 2,
+    log_sigma_size: float = 0.2,
+    n_sds_above_mean_thresh: float = 10,
     outlier_keep: bool = False,
     artifact_keep: bool = False,
     save_planes: bool = False,
@@ -148,9 +148,9 @@ def main(
     if signal_array.ndim != 3:
         raise ValueError("Input data must be 3D")
 
-    if end_plane == -1:
+    if end_plane < 0:
         end_plane = len(signal_array)
-    n_planes = max(min(len(signal_array), end_plane) - start_plane, 0)
+    end_plane = min(len(signal_array), end_plane)
 
     torch_device = torch_device.lower()
     batch_size = max(batch_size, 1)
@@ -166,7 +166,6 @@ def main(
         ball_z_size_um=ball_z_size,
         start_plane=start_plane,
         end_plane=end_plane,
-        n_planes=n_planes,
         n_free_cpus=n_free_cpus,
         ball_overlap_fraction=ball_overlap_fraction,
         log_sigma_size=log_sigma_size,

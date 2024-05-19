@@ -1,3 +1,5 @@
+from typing import Type
+
 import numpy as np
 import pytest
 
@@ -22,7 +24,9 @@ from cellfinder.core.tools.tools import get_max_possible_int_value
         (258, np.uint32),
     ],
 )
-def test_connect_four_limits(linear_size: int, datatype: np.dtype) -> None:
+def test_connect_four_limits(
+    linear_size: int, datatype: Type[np.number]
+) -> None:
     """
     Test for `connect_four` with a rectangular plane (2-to-1 length ratio)
     containing a checkerboard of pixels marked as cells ("structures").
