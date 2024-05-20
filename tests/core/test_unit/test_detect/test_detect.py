@@ -7,25 +7,6 @@ from pytest_mock.plugin import MockerFixture
 from cellfinder.core.detect.detect import main
 
 
-def call_main(**kwargs):
-    d = {
-        "start_plane": 0,
-        "end_plane": 1,
-        "voxel_sizes": (5, 5, 5),
-        "soma_diameter": 30,
-        "max_cluster_size": 100_000,
-        "ball_xy_size": 6,
-        "ball_z_size": 15,
-        "ball_overlap_fraction": 0.5,
-        "soma_spread_factor": 1.4,
-        "n_free_cpus": 1,
-        "log_sigma_size": 0.2,
-        "n_sds_above_mean_thresh": 10,
-    }
-    d.update(kwargs)
-    main(**d)
-
-
 @pytest.fixture
 def mocked_main(mocker: MockerFixture):
     from cellfinder.core.detect.filters.volume.volume_filter import (
@@ -41,22 +22,23 @@ def mocked_main(mocker: MockerFixture):
 
 
 def test_main_bad_signal_arg(mocked_main):
-    call_main(signal_array=np.empty((1, 1, 1)))
+    # should work
+    main(signal_array=np.empty((5, 50, 50)))
 
     with pytest.raises(ValueError):
-        call_main(signal_array=np.empty((1, 1, 1, 1)))
+        main(signal_array=np.empty((1, 1, 1, 1)))
 
     with pytest.raises(ValueError):
-        call_main(signal_array=np.empty((1, 1)))
+        main(signal_array=np.empty((1, 1)))
 
     with pytest.raises(TypeError):
-        call_main(signal_array=np.empty((1, 1, 1), dtype=np.str_))
+        main(signal_array=np.empty((5, 50, 50), dtype=np.str_))
 
     with pytest.raises(TypeError):
-        call_main(signal_array=np.empty((1, 1, 1), dtype=np.uint64))
+        main(signal_array=np.empty((5, 50, 50), dtype=np.uint64))
 
     with pytest.raises(TypeError):
-        call_main(signal_array=np.empty((1, 1, 1), dtype=np.int64))
+        main(signal_array=np.empty((5, 50, 50), dtype=np.int64))
 
 
 @pytest.mark.parametrize(
@@ -73,12 +55,12 @@ def test_main_bad_signal_arg(mocked_main):
     ],
 )
 def test_main_good_signal_arg(mocked_main, dtype):
-    call_main(signal_array=np.empty((1, 1, 1)))
+    main(signal_array=np.empty((5, 50, 50)))
 
 
 def test_main_bad_or_default_args(mocked_main):
     process, get_results = mocked_main
-    call_main(
+    main(
         signal_array=np.empty((5, 8, 19), dtype=np.uint16),
         end_plane=-1,
         batch_size=None,
@@ -108,7 +90,7 @@ def test_main_bad_or_default_args(mocked_main):
 
 def test_main_planes_size(mocked_main):
     process, get_results = mocked_main
-    call_main(signal_array=np.empty((5, 8, 19)), end_plane=4, start_plane=1)
+    main(signal_array=np.empty((5, 8, 19)), end_plane=4, start_plane=1)
 
     process.assert_called()
     vol_filter, mp_tile_processor, signal_array = process.call_args.args
@@ -128,7 +110,7 @@ def test_main_splitting_cpu_cuda(mocker: MockerFixture):
     )
     mocker.patch("cellfinder.core.detect.detect.TileProcessor", autospec=True)
 
-    call_main(
+    main(
         signal_array=np.empty((5, 8, 19)), batch_size=None, torch_device="cuda"
     )
 

@@ -18,31 +18,13 @@ def raise_exception(*args, **kwargs):
     raise ExceptionTest("Bad times")
 
 
-def call_main(**kwargs):
-    d = {
-        "start_plane": 0,
-        "end_plane": 1,
-        "voxel_sizes": (5, 5, 5),
-        "soma_diameter": 30,
-        "max_cluster_size": 100_000,
-        "ball_xy_size": 6,
-        "ball_z_size": 15,
-        "ball_overlap_fraction": 0.5,
-        "soma_spread_factor": 1.4,
-        "n_free_cpus": 1,
-        "log_sigma_size": 0.2,
-        "n_sds_above_mean_thresh": 10,
-    }
-    d.update(kwargs)
-    main(**d)
-
-
 def run_main_assert_exception():
     # run volume filter - it should raise the ExceptionTest via
     # ExecutionFailure from thread/process
     try:
         # must be on cpu b/c only on cpu do we do 2d filtering in subprocess
-        call_main(signal_array=np.zeros((4, 50, 50)), torch_device="cpu")
+        # lots of planes so it doesn't end naturally quickly
+        main(signal_array=np.zeros((500, 500, 500)), torch_device="cpu")
         assert False, "should have raised exception"
     except ExecutionFailure as e:
         e2 = e.__cause__
@@ -92,24 +74,49 @@ def test_3d_filter_main_thread_exception(mocker: MockerFixture):
 
     mocker.patch.object(VolumeFilter, "_process", new=raise_exception)
     with pytest.raises(ExceptionTest):
-        call_main(signal_array=np.zeros((5, 50, 50)), torch_device="cpu")
+        main(signal_array=np.zeros((500, 500, 500)), torch_device="cpu")
 
 
 @pytest.mark.parametrize("batch_size", [1, 2, 3, 4])
 def test_feeder_thread_batch(batch_size: int):
     # checks various batch sizes to see if there are issues
-    # this also tests a batch size of 3 but 4 planes. So the feeder thread
-    # will feed us a batch of 3 and a batch of 1. It tests that filters can
+    # this also tests a batch size of 3 but 5 planes. So the feeder thread
+    # will feed us a batch of 3 and a batch of 2. It tests that filters can
     # handle unequal batch sizes
-    call_main(
-        signal_array=np.zeros((4, 50, 50)),
+    planes = []
+
+    def callback(z):
+        planes.append(z)
+
+    main(
+        signal_array=np.zeros((5, 50, 50)),
         torch_device="cpu",
         batch_size=batch_size,
+        callback=callback,
     )
+
+    assert planes == list(range(1, 4))
+
+
+def test_not_enough_planes():
+    # checks that even if there are not enough planes for volume filtering, it
+    # doesn't raise errors or gets stuck
+    planes = []
+
+    def callback(z):
+        planes.append(z)
+
+    main(
+        signal_array=np.zeros((2, 50, 50)),
+        torch_device="cpu",
+        callback=callback,
+    )
+
+    assert not planes
 
 
 def test_filtered_plane_range(mocker: MockerFixture):
-    # check that even if input data is negative, filtered data is positive
+    # check that even if input data is negative, filtered data is non-negative
     detector = mocker.patch(
         "cellfinder.core.detect.filters.volume.volume_filter.CellDetector",
         autospec=True,
@@ -117,7 +124,7 @@ def test_filtered_plane_range(mocker: MockerFixture):
 
     # input data in range (-500, 500)
     data = ((np.random.random((6, 50, 50)) - 0.5) * 1000).astype(np.float32)
-    call_main(signal_array=data)
+    main(signal_array=data)
 
     calls = detector.return_value.process.call_args_list
     assert len(calls)
@@ -126,3 +133,36 @@ def test_filtered_plane_range(mocker: MockerFixture):
         # should have at least background and foreground pixels
         assert len(np.unique(plane)) >= 2
         assert np.min(plane) >= 0
+
+
+def test_saving_filtered_planes(tmp_path):
+    # check that we can save filtered planes
+    path = tmp_path / "save_planes"
+    path.mkdir()
+
+    main(
+        signal_array=np.zeros((6, 50, 50)),
+        save_planes=True,
+        plane_directory=str(path),
+    )
+
+    files = [p.name for p in path.iterdir() if p.is_file()]
+    # we're skipping first and last plane that isn't filtered due to kernel
+    assert len(files) == 4
+    assert files == [
+        "plane_0001.tif",
+        "plane_0002.tif",
+        "plane_0003.tif",
+        "plane_0004.tif",
+    ]
+
+
+def test_saving_filtered_planes_no_dir():
+    # asked to save but didn't provide directory
+    with pytest.raises(ExecutionFailure) as exc_info:
+        main(
+            signal_array=np.zeros((6, 50, 50)),
+            save_planes=True,
+            plane_directory=None,
+        )
+    assert type(exc_info.value.__cause__) is ValueError

@@ -199,3 +199,27 @@ def test_detection(
 
     coords = detector.get_structures()
     assert coords_to_points(coords) == expected_coords
+
+
+def test_add_point():
+    detector = CellDetector(50, 50, 0, 0)
+    detector.add_point(0, (5, 5, 5))
+    detector.add_point(0, (6, 5, 5))
+    detector.add_point(1, (7, 5, 5))
+
+
+def test_add_points():
+    detector = CellDetector(50, 50, 0, 0)
+
+    points = np.array([(5, 5, 5), (6, 6, 6)], dtype=np.uint32)
+    points2 = np.array([(7, 5, 5), (8, 6, 6)], dtype=np.uint32)
+    points3 = np.array([(8, 5, 5), (8, 6, 6)], dtype=np.uint32)
+    detector.add_points(0, points)
+    detector.add_points(0, points2)
+    detector.add_points(1, points3)
+
+
+def test_change_plane_size():
+    detector = CellDetector(50, 50, 0, 5000)
+    with pytest.raises(ValueError):
+        detector.process(np.zeros((100, 50), dtype=np.uint32), None)

@@ -1,4 +1,3 @@
-import math
 import multiprocessing as mp
 import os
 from functools import partial
@@ -188,8 +187,7 @@ class VolumeFilter:
             np_data = data_converter(data[z : z + batch_size, :, :])
             # if we ran out of batches, we are done!
             n = np_data.shape[0]
-            if not n:
-                return
+            assert n
 
             # thread/underlying queues get first crack at msg. Unless we get
             # eof, this will block until a buffer is returned from the main
@@ -290,11 +288,18 @@ class VolumeFilter:
             for process in plane_processes:
                 process.notify_to_end_thread()
 
-        # the notification above ensures this won't block forever
-        feed_thread.join()
-        cells_thread.join()
-        for process in plane_processes:
-            process.join()
+            # the notification above ensures this won't block forever
+            feed_thread.join()
+            cells_thread.join()
+            for process in plane_processes:
+                process.join()
+
+            # in case these threads sent us an exception but we didn't yet read
+            # it, make sure to process them
+            feed_thread.clear_remaining()
+            cells_thread.clear_remaining()
+            for process in plane_processes:
+                process.clear_remaining()
 
         progress_bar.close()
         logger.debug("3D filter done")
@@ -315,8 +320,9 @@ class VolumeFilter:
         processing_tokens = []
 
         while True:
-            # thread/underlying queues get first crack at msg. Unless we
-            # get eof, this will block until we get more loaded data
+            # thread/underlying queues get first crack at msg. Unless we get
+            # eof, this will block until we get more loaded data until no more
+            # data or exception
             msg = feed_thread.get_msg_from_thread()
             # feeder thread exits at the end, causing a eof to be sent
             if msg is EOFSignal:
@@ -326,8 +332,9 @@ class VolumeFilter:
             processing_tokens.append(token)
 
             if cpu:
-                # we did 2d filtering in different process
-                # make sure all the planes are done filtering
+                # we did 2d filtering in different process. Make sure all the
+                # planes are done filtering. Each msg from feeder thread has
+                # corresponding msg for each used processor (unless exception)
                 for process in used_processors:
                     process.get_msg_from_thread()
                 # batch size can change at the end so resize buffer
@@ -353,7 +360,7 @@ class VolumeFilter:
                 # indicating we can send more data. The cells thread has a
                 # fixed token supply, ensuring we don't send it too much
                 # data, in case detection takes longer than filtering
-                # (but typically that's not the slow part)
+                # Also, error messages incoming are at most # tokens behind
                 token = cells_thread.get_msg_from_thread()
                 if token is EOFSignal:
                     break
@@ -370,6 +377,7 @@ class VolumeFilter:
         """
         detector = self.cell_detector
         detection_dtype = self.settings.detection_dtype
+        save_planes = self.settings.save_planes
         previous_plane = None
 
         # main thread needs a token to send us planes - populate with some
@@ -388,13 +396,11 @@ class VolumeFilter:
             middle_planes, token = msg
             middle_planes = middle_planes.astype(detection_dtype)
 
-            logger.debug(f"🏐 Ball filtering planes {self.z}")
-            if self.settings.save_planes:
-                for plane in middle_planes:
+            logger.debug(f"🏫 Detecting structures for planes {self.z}+")
+            for plane in middle_planes:
+                if save_planes:
                     self.save_plane(plane)
 
-            logger.debug(f"🏫 Detecting structures for planes {self.z}")
-            for plane in middle_planes:
                 previous_plane = detector.process(plane, previous_plane)
 
                 if callback is not None:
@@ -405,7 +411,7 @@ class VolumeFilter:
             # we must return the token, otherwise the main thread will run out
             # and won't send more data to us
             thread.send_msg_to_mainthread(token)
-            logger.debug(f"🏫 Structures done for planes {self.z}")
+            logger.debug(f"🏫 Structures done for planes {self.z}+")
 
     def save_plane(self, plane: np.ndarray) -> None:
         """
@@ -415,9 +421,9 @@ class VolumeFilter:
             raise ValueError(
                 "plane_directory must be set to save planes to file"
             )
-        plane_name = f"plane_{str(self.z).zfill(4)}.tif"
+        plane_name = self.settings.plane_prefix.format(n=self.z) + ".tif"
         f_path = os.path.join(self.settings.plane_directory, plane_name)
-        tifffile.imsave(f_path, plane.T)
+        tifffile.imwrite(f_path, plane.T)
 
     def get_results(self, settings: DetectionSettings) -> List[Cell]:
         """
@@ -429,9 +435,7 @@ class VolumeFilter:
         logger.info("Splitting cell clusters and writing results")
 
         root_settings = self.settings
-        max_cell_volume = sphere_volume(
-            root_settings.soma_spread_factor * root_settings.soma_diameter / 2
-        )
+        max_cell_volume = settings.max_cell_volume
 
         # valid cells
         cells = []
@@ -501,7 +505,3 @@ def _split_cells(arg, settings: DetectionSettings):
         return split_cells(cell_points, settings=settings)
     except (ValueError, AssertionError) as err:
         raise StructureSplitException(f"Cell {cell_id}, error; {err}")
-
-
-def sphere_volume(radius: float) -> float:
-    return (4 / 3) * math.pi * radius**3

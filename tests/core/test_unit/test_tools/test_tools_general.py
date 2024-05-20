@@ -55,6 +55,11 @@ def test_get_max_possible_int_value(dtype, value):
     assert tools.get_max_possible_int_value(dtype) == value
 
 
+def test_get_max_possible_int_value_bad_dtype():
+    with pytest.raises(ValueError):
+        tools.get_max_possible_int_value(np.str_)
+
+
 # for float, the values come from the mantissa and it's the largest int value
 # representable without losing significant digits
 @pytest.mark.parametrize(
@@ -74,6 +79,11 @@ def test_get_max_possible_int_value(dtype, value):
 )
 def test_get_min_possible_int_value(dtype, value):
     assert tools.get_min_possible_int_value(dtype) == value
+
+
+def test_get_min_possible_int_value_bad_dtype():
+    with pytest.raises(ValueError):
+        tools.get_min_possible_int_value(np.str_)
 
 
 @pytest.mark.parametrize(

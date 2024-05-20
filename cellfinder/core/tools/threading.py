@@ -20,6 +20,11 @@ class ExceptionWithQueueMixIn:
 
     args: tuple = ()
 
+    # user_func_runner must end with an eof msg to the main thread. This tracks
+    # whether the main thread saw the eof. If it didn't, we know there are more
+    # msgs in the queue waiting to be read
+    _saw_eof: bool = False
+
     def __init__(self, target, pass_self=False):
         self.user_func = target
         self.pass_self = pass_self
@@ -41,9 +46,14 @@ class ExceptionWithQueueMixIn:
     def send_msg_to_mainthread(self, value):
         self.from_thread_queue.put(("user", value), block=True, timeout=None)
 
+    def clear_remaining(self) -> None:
+        while not self._saw_eof:
+            self.get_msg_from_thread()
+
     def get_msg_from_thread(self, timeout=None):
         msg, value = self.from_thread_queue.get(block=True, timeout=timeout)
         if msg == "eof":
+            self._saw_eof = True
             return EOFSignal
         if msg == "exception":
             raise ExecutionFailure(

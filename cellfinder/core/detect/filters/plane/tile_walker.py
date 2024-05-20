@@ -26,6 +26,7 @@ class TileWalker:
     def __init__(
         self, plane_shape: Tuple[int, int], soma_diameter: int
     ) -> None:
+
         self.img_height, self.img_width = plane_shape
         self.tile_height = soma_diameter * 2
         self.tile_width = soma_diameter * 2

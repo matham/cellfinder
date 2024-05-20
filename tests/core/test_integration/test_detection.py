@@ -9,6 +9,7 @@ from brainglobe_utils.general.system import get_num_processes
 from brainglobe_utils.IO.image.load import read_with_dask
 
 from cellfinder.core.detect.detect import main as detect_main
+from cellfinder.core.detect.filters.volume.ball_filter import InvalidVolume
 from cellfinder.core.main import main
 
 data_dir = os.path.join(
@@ -278,3 +279,43 @@ def test_detection_cluster_splitting(
         p = [cell.x, cell.y, cell.z]
         d = np.sqrt(np.sum(np.square(np.subtract(center, p))))
         assert d <= 3
+        assert cell.type == Cell.UNKNOWN
+
+
+def test_detection_cell_too_large(synthetic_spot_clusters, no_free_cpus):
+    """
+    Test cluster splitting for overlapping cells.
+
+    Test filtering/detection on cpu and cuda. Because splitting is only on cpu
+    so make sure if detection is on cuda, splitting still works.
+    """
+    # max_cell_volume is volume of soma * spread sphere. For values below
+    # radius is 7 pixels. So volume is ~1500 pixels
+    signal_array = np.zeros((15, 100, 100), dtype=np.float32)
+    # set volume larger than max volume to bright
+    signal_array[6 : 6 + 6, 40 : 40 + 26, 40 : 40 + 26] = 1000
+
+    detected = detect_main(
+        signal_array,
+        n_sds_above_mean_thresh=1.0,
+        voxel_sizes=(5, 2, 2),
+        soma_diameter=20,
+        n_free_cpus=no_free_cpus,
+        max_cluster_size=2000 * 5 * 2 * 2,
+    )
+
+    assert len(detected) == 1
+    # not sure why it subtracts one to center, but probably rounding
+    assert detected[0] == Cell([39 + 13, 39 + 13, 5 + 3], Cell.ARTIFACT)
+
+
+@pytest.mark.parametrize("y,x", [(100, 30), (30, 100)])
+def test_detection_plane_too_small(synthetic_spot_clusters, y, x):
+    # plane smaller than ball filter kernel should cause error
+    with pytest.raises(InvalidVolume):
+        detect_main(
+            np.zeros((5, y, x)),
+            n_sds_above_mean_thresh=1.0,
+            voxel_sizes=(1, 1, 1),
+            ball_xy_size=50,
+        )

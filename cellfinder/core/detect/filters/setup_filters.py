@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Callable, Optional, Tuple, Type
@@ -272,3 +273,14 @@ class DetectionSettings:
                 "image planes."
             )
         return ball_z_size
+
+    @property
+    def max_cell_volume(self) -> float:
+        radius = self.soma_spread_factor * self.soma_diameter / 2
+        return (4 / 3) * math.pi * radius**3
+
+    @property
+    def plane_prefix(self) -> str:
+        n = max(4, int(math.ceil(math.log10(self.n_planes))))
+        name = f"plane_{{n:0{n}d}}"
+        return name
