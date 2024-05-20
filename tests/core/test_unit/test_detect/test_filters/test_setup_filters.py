@@ -1,3 +1,5 @@
+import pickle
+
 import numpy as np
 import pytest
 
@@ -72,3 +74,25 @@ def test_bad_input_dtype(in_dtype):
     with pytest.raises(TypeError):
         # it depends on filtering_dtype used, which raises exception
         assert settings.detection_dtype
+
+
+def test_pickle_settings():
+    settings = DetectionSettings()
+
+    # get some properties, both cached and not cached
+    assert settings.filter_data_converter_func is not None
+    assert settings.filtering_dtype is not None
+    assert settings.detection_dtype is not None
+    assert settings.threshold_value is not None
+    assert settings.plane_shape is not None
+
+    # make sure pickle works
+    s = pickle.dumps(settings)
+    assert s
+
+
+def test_bad_ball_z_size():
+    settings = DetectionSettings(ball_z_size_um=0)
+    with pytest.raises(ValueError):
+        # do something with value to quiet linter
+        assert settings.ball_z_size
