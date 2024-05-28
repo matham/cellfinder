@@ -128,10 +128,13 @@ class TileProcessor:
         enhanced_planes = self.peak_enhancer.enhance_peaks(planes)
 
         _threshold_planes(
-            enhanced_planes, self.n_sds_above_mean_thresh, self.threshold_value
+            planes,
+            enhanced_planes,
+            self.n_sds_above_mean_thresh,
+            self.threshold_value,
         )
 
-        return enhanced_planes, inside_brain_tiles
+        return planes, inside_brain_tiles
 
     def get_tiled_buffer(self, depth: int, device: str):
         return self.tile_walker.get_tiled_buffer(depth, device)
@@ -139,6 +142,7 @@ class TileProcessor:
 
 @torch.jit.script
 def _threshold_planes(
+    planes: torch.Tensor,
     enhanced_planes: torch.Tensor,
     n_sds_above_mean_thresh: float,
     threshold_value: int,
@@ -153,4 +157,4 @@ def _threshold_planes(
     sd = torch.std(planes_1d, dim=1, keepdim=True).unsqueeze(2)
     threshold = avg + n_sds_above_mean_thresh * sd
 
-    enhanced_planes[enhanced_planes > threshold] = threshold_value
+    planes[enhanced_planes > threshold] = threshold_value

@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import List, Tuple
 
 import numpy as np
@@ -160,3 +161,12 @@ def synthetic_spot_clusters() -> (
         )
 
     return signal_array, background_array, centers_xyz
+
+
+@pytest.fixture(scope="session")
+def repo_data_path() -> Path:
+    """
+    The root path where the data used during test is stored
+    """
+    # todo: use mod relative paths to find data instead of depending on cwd
+    return Path.cwd() / "tests" / "data"

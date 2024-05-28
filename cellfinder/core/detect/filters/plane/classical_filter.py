@@ -1,5 +1,5 @@
 import torch
-import torch.nn.functional as F
+import torch.nn as nn
 from kornia.filters.kernels import (
     get_binary_kernel2d,
     get_gaussian_kernel1d,
@@ -35,12 +35,11 @@ def normalize(filtered_planes: torch.Tensor, clipping_value: float) -> None:
     filtered_planes_1d.mul_(clipping_value)
 
 
-@torch.jit.script
 def filter_for_peaks(
     planes: torch.Tensor,
-    bin_kernel: torch.Tensor,
-    gauss_kernel: torch.Tensor,
-    lap_kernel: torch.Tensor,
+    med_filter: nn.Module,
+    gauss_filter: nn.Module,
+    lap_filter: nn.Module,
     device: str,
 ) -> torch.Tensor:
     """
@@ -52,50 +51,41 @@ def filter_for_peaks(
     filtered_planes = planes.unsqueeze(1)  # ZYX -> ZCYX input
 
     # ---------- median filter ----------
-    # extract patches to compute median over for each pixel
+    # extracts patches to compute median over for each pixel
     # We go from ZCYX -> ZCYX, C=1 to C=9 and containing the elements around
     # each Z,X,Y over which we compute the median
-    filtered_planes = F.conv2d(filtered_planes, bin_kernel, padding="same")
-    # we're going back to ZCYX=Z1YX
+    filtered_planes = med_filter(filtered_planes)
+    # we're going back to ZCYX=Z1YX by taking median of patches
     filtered_planes = filtered_planes.median(dim=1, keepdim=True)[0]
 
     # ---------- gaussian filter ----------
     # We apply the 1D gaussian filter twice, once for Y and once for X. The
     # filter shape passed in is 11K1 or 111K, depending on device. Where
     # K=filter size
-    # todo use reflect padding or check if needed
     # see https://discuss.pytorch.org/t/performance-issue-for-conv2d-with-1d-
     # filter-along-a-dim/201734/2 for the reason for the moveaxis depending
     # on the device
     if device == "cpu":
         # kernel shape is 11K1. First do Y (second to last axis)
-        filtered_planes = F.conv2d(
-            filtered_planes, gauss_kernel, padding="same"
-        )
+        filtered_planes = gauss_filter(filtered_planes)
         # To do X, exchange X,Y axis, filter, change back. On CPU, Y (second
         # to last) axis is faster.
-        filtered_planes = F.conv2d(
-            filtered_planes.moveaxis(-1, -2), gauss_kernel, padding="same"
+        filtered_planes = gauss_filter(
+            filtered_planes.moveaxis(-1, -2)
         ).moveaxis(-1, -2)
     else:
         # kernel shape is 111K
         # First do Y (second to last axis). Exchange X,Y axis, filter, change
         # back. On CUDA, X (last) axis is faster.
-        filtered_planes = F.conv2d(
-            filtered_planes.moveaxis(-1, -2), gauss_kernel, padding="same"
+        filtered_planes = gauss_filter(
+            filtered_planes.moveaxis(-1, -2)
         ).moveaxis(-1, -2)
         # now do X, last axis
-        filtered_planes = F.conv2d(
-            filtered_planes, gauss_kernel, padding="same"
-        )
+        filtered_planes = gauss_filter(filtered_planes)
 
     # ---------- laplacian filter ----------
-    # filter comes in as 2d, make it 4d as required for conv
-    lap_kernel = lap_kernel.view(
-        1, 1, lap_kernel.shape[0], lap_kernel.shape[1]
-    )
-    # todo use reflect padding or check if needed
-    filtered_planes = F.conv2d(filtered_planes, lap_kernel, padding="same")
+    # it's a 2d filter
+    filtered_planes = lap_filter(filtered_planes)
 
     # we don't need the channel axis
     return filtered_planes[:, 0, :, :]
@@ -128,17 +118,17 @@ class PeakEnchancer:
         pytorch filters used on CUDA. Scipy filters can be faster.
     """
 
-    # binary filter that gets square patches for each voxel so we can find the
-    # median. Shape is ZCYX (C=1). See filter_for_peaks for details.
-    bin_kernel: torch.Tensor
+    # binary filter that generates square patches for each voxel so we can find
+    # the median. Input shape expected is ZCYX (C=1)
+    med_filter: nn.Module
 
-    # gaussian 1D kernel of shape 11K1 or 111K, depending on device. Where
-    # K=filter size. See filter_for_peaks for details.
-    gauss_kernel: torch.Tensor
+    # gaussian 1D filter with kernel/weight shape 11K1 or 111K, depending
+    # on device. Where K=filter size
+    gauss_filter: nn.Module
 
-    # 2D laplacian kernel of shape KxK. Where
-    # K=filter size. See filter_for_peaks for details.
-    lap_kernel: torch.Tensor
+    # 2D laplacian filter with kernel/weight shape KxK. Where
+    # K=filter size
+    lap_filter: nn.Module
 
     # the value such that after normalizing, the max value will be this
     # clipping_value
@@ -167,34 +157,104 @@ class PeakEnchancer:
         self.laplace_gaussian_sigma = laplace_gaussian_sigma
         self.use_scipy = use_scipy
 
+        self.med_filter = self._get_median_filter(torch_device, dtype)
+        self.gauss_filter = self._get_gaussian_filter(
+            torch_device, dtype, laplace_gaussian_sigma
+        )
+        self.lap_filter = self._get_laplacian_filter(torch_device, dtype)
+
+    def _get_median_filter(
+        self, torch_device: str, dtype: torch.dtype
+    ) -> nn.Module:
+        """
+        Gets a median patch generator torch module, already on the correct
+        device.
+        """
         # must be odd kernel
-        self.bin_kernel = get_binary_kernel2d(
-            3, device=torch_device, dtype=dtype
+        kernel_n = 3
+        weight = get_binary_kernel2d(
+            kernel_n, device=torch_device, dtype=dtype
         )
 
+        # extract patches to compute median over for each pixel. When passing
+        # input we go from ZCYX -> ZCYX, C=1 to C=9 and containing the elements
+        # around each Z,X,Y over which we can then compute the median
+        module = nn.Conv2d(
+            1,
+            kernel_n * kernel_n,
+            (kernel_n, kernel_n),
+            padding="same",
+            padding_mode="reflect",
+            bias=False,
+            device=torch_device,
+        )
+        module.weight.copy_(weight)
+
+        return module
+
+    def _get_gaussian_filter(
+        self,
+        torch_device: str,
+        dtype: torch.dtype,
+        laplace_gaussian_sigma: float,
+    ) -> nn.Module:
         kernel_size = 2 * int(round(4 * laplace_gaussian_sigma)) + 1
-        # shape is 11K1
-        self.gauss_kernel = get_gaussian_kernel1d(
+        # shape of kernel is 11K1 with dims Z, C, Y, X. C=1, Z is expanded to
+        # number of z.
+        gauss_kernel = get_gaussian_kernel1d(
             kernel_size,
             laplace_gaussian_sigma,
             device=torch_device,
             dtype=dtype,
         ).view(1, 1, -1, 1)
+        # default shape is y, x with y axis filtered only - we flip input to
+        # filter on x
+        kernel_shape = kernel_size, 1
+
         # see https://discuss.pytorch.org/t/performance-issue-for-conv2d-
         # with-1d-filter-along-a-dim/201734. Conv2d is faster on a specific dim
         # for 1D filters depending on CPU/CUDA. See also filter_for_peaks
-        if self.torch_device == "cpu":
-            # on CPU, we only do conv2d on the (third) dim
-            self.gauss_kernel = self.gauss_kernel.view(1, 1, -1, 1)
-        else:
-            # on CUDA, we only do conv2d on the (forth) dim
-            self.gauss_kernel = self.gauss_kernel.view(1, 1, 1, -1)
+        # on CPU, we only do conv2d on the (1st) dim
+        if torch_device != "cpu":
+            # on CUDA, we only filter on the x dim, flipping input to filter y
+            gauss_kernel = gauss_kernel.view(1, 1, 1, -1)
+            kernel_shape = 1, kernel_size
 
+        module = nn.Conv2d(
+            1,
+            1,
+            kernel_shape,
+            padding="same",
+            padding_mode="reflect",
+            bias=False,
+            device=torch_device,
+        )
+        module.weight.copy_(gauss_kernel)
+
+        return module
+
+    def _get_laplacian_filter(
+        self, torch_device: str, dtype: torch.dtype
+    ) -> nn.Module:
+        # must be odd kernel
         lap_kernel = get_laplacian_kernel2d(
             3, device=torch_device, dtype=dtype
         )
-        # it is 2d
-        self.lap_kernel = normalize_kernel2d(lap_kernel)
+        # it is 2d so turn kernel in 4d, like other filters (ZCYX)
+        lap_kernel = normalize_kernel2d(lap_kernel).unsqueeze(0).unsqueeze(0)
+
+        module = nn.Conv2d(
+            1,
+            1,
+            (3, 3),
+            padding="same",
+            padding_mode="reflect",
+            bias=False,
+            device=torch_device,
+        )
+        module.weight.copy_(lap_kernel)
+
+        return module
 
     def enhance_peaks(self, planes: torch.Tensor) -> torch.Tensor:
         """
@@ -212,10 +272,11 @@ class PeakEnchancer:
         else:
             filtered_planes = filter_for_peaks(
                 planes,
-                self.bin_kernel,
-                self.gauss_kernel,
-                self.lap_kernel,
+                self.med_filter,
+                self.gauss_filter,
+                self.lap_filter,
                 self.torch_device,
             )
+
         normalize(filtered_planes, self.clipping_value)
         return filtered_planes

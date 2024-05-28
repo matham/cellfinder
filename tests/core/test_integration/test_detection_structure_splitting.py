@@ -6,8 +6,6 @@ example created to cover the structure splitting code with (modified)
 real life data.
 """
 
-import os
-
 import numpy as np
 import pytest
 from brainglobe_utils.IO.image.load import read_with_dask
@@ -17,27 +15,35 @@ from cellfinder.core.detect.filters.volume.structure_splitting import (
 )
 from cellfinder.core.main import main
 
-data_dir = os.path.join(
-    os.getcwd(), "tests", "data", "integration", "detection"
-)
-signal_data_path = os.path.join(data_dir, "structure_split_test", "signal")
-background_data_path = os.path.join(
-    data_dir, "structure_split_test", "background"
-)
-
 voxel_sizes = [5, 2.31, 2.31]
 
 
 @pytest.fixture
-def signal_array():
+def signal_array(repo_data_path):
     """A signal array that contains a structure that needs splitting."""
-    return read_with_dask(signal_data_path)
+    return read_with_dask(
+        str(
+            repo_data_path
+            / "integration"
+            / "detection"
+            / "structure_split_test"
+            / "signal"
+        )
+    )
 
 
 @pytest.fixture
-def background_array():
+def background_array(repo_data_path):
     """A background array that contains a structure that needs splitting."""
-    return read_with_dask(background_data_path)
+    return read_with_dask(
+        str(
+            repo_data_path
+            / "integration"
+            / "detection"
+            / "structure_split_test"
+            / "background"
+        )
+    )
 
 
 def test_structure_splitting(signal_array, background_array):
