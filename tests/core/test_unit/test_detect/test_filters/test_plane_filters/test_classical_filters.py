@@ -20,7 +20,14 @@ def filtered_data_array(repo_data_path):
     filtered_path = (
         repo_data_path / "integration" / "detection" / "2d_filter" / "signal"
     )
-    return read_with_dask(str(data_path)), read_with_dask(str(filtered_path))
+    tiles_path = (
+        repo_data_path / "integration" / "detection" / "2d_filter" / "tiles"
+    )
+    return (
+        read_with_dask(str(data_path)),
+        read_with_dask(str(filtered_path)),
+        read_with_dask(str(tiles_path)),
+    )
 
 
 @pytest.mark.parametrize(
@@ -32,9 +39,10 @@ def test_2d_filtering(filtered_data_array, torch_device, use_scipy):
         pytest.skip("Cuda is not available")
 
     # check input data size/type is as expected
-    data, filtered = filtered_data_array
+    data, filtered, tiles = filtered_data_array
     data = np.asarray(data)
     filtered = np.asarray(filtered)
+    tiles = np.asarray(tiles)
     assert data.dtype == np.uint16
     assert filtered.dtype == np.uint16
     assert data.shape == filtered.shape
@@ -58,8 +66,9 @@ def test_2d_filtering(filtered_data_array, torch_device, use_scipy):
         )
 
         # apply filter and get data back
-        filtered_our, tiles = tile_processor.get_tile_mask(data)
+        filtered_our, tiles_our = tile_processor.get_tile_mask(data)
         filtered_our = filtered_our.cpu().numpy().astype(np.uint16)
+        tiles_our = tiles_our.cpu().numpy()
 
     assert filtered_our.shape == filtered.shape
     # the number of pixels per plane that are different
@@ -70,3 +79,7 @@ def test_2d_filtering(filtered_data_array, torch_device, use_scipy):
     frac = diff / n_pixels
     # 99.99% same
     assert np.all(np.less(frac, 1 - 0.9999))
+
+    assert tiles_our.shape == tiles.shape
+    assert tiles_our.dtype == tiles.dtype
+    assert np.array_equal(tiles_our, tiles)
