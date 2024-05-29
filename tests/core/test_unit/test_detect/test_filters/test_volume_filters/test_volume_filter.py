@@ -1,8 +1,10 @@
 import numpy as np
 import pytest
+import torch
 from pytest_mock.plugin import MockerFixture
 
 from cellfinder.core.detect.detect import main
+from cellfinder.core.tools.IO import read_with_dask
 from cellfinder.core.tools.threading import ExecutionFailure
 
 # even though we are testing volume filter as unit test, we are running through
@@ -12,6 +14,25 @@ from cellfinder.core.tools.threading import ExecutionFailure
 
 class ExceptionTest(Exception):
     pass
+
+
+@pytest.fixture
+def filtered_data_array(repo_data_path):
+    # loads an input and already 3d filtered data set
+    data_path = (
+        repo_data_path
+        / "integration"
+        / "detection"
+        / "structure_split_test"
+        / "signal"
+    )
+    filtered_path = (
+        repo_data_path / "integration" / "detection" / "filter" / "3d_filter"
+    )
+    return (
+        read_with_dask(str(data_path)),
+        read_with_dask(str(filtered_path)),
+    )
 
 
 def raise_exception(*args, **kwargs):
@@ -166,3 +187,53 @@ def test_saving_filtered_planes_no_dir():
             plane_directory=None,
         )
     assert type(exc_info.value.__cause__) is ValueError
+
+
+@pytest.mark.parametrize(
+    "torch_device,use_scipy", [("cpu", False), ("cpu", True), ("cuda", False)]
+)
+def test_3d_filtering_saved(
+    filtered_data_array, torch_device, use_scipy, no_free_cpus, tmp_path
+):
+    # test that the full 2d/3d matches the saved data
+    if torch_device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("Cuda is not available")
+
+    # check input data size/type is as expected
+    data, filtered = filtered_data_array
+    data = np.asarray(data)
+    filtered = np.asarray(filtered)
+    assert data.dtype == np.uint16
+    assert filtered.dtype == np.uint32
+    assert data.shape == (filtered.shape[0] + 2, *filtered.shape[1:])
+
+    path = tmp_path / "3d_filter"
+    path.mkdir()
+    main(
+        signal_array=data,
+        voxel_sizes=(5, 2, 2),
+        soma_diameter=16,
+        max_cluster_size=100000,
+        ball_xy_size=6,
+        ball_z_size=15,
+        ball_overlap_fraction=0.6,
+        soma_spread_factor=1.4,
+        n_free_cpus=no_free_cpus,
+        log_sigma_size=0.2,
+        n_sds_above_mean_thresh=10,
+        save_planes=True,
+        plane_directory=str(path),
+    )
+
+    filtered_our = np.asarray(read_with_dask(str(path)))
+    assert filtered_our.shape == filtered.shape
+    assert filtered_our.dtype == np.uint16
+
+    # the number of pixels per plane that are different
+    diff = np.sum(np.sum(filtered_our != filtered, axis=2), axis=1)
+    # total pixels per plane
+    n_pixels = data.shape[1] * data.shape[2]
+    # fraction pixels that are different
+    frac = diff / n_pixels
+    # 99.9% same
+    assert np.all(np.less(frac, 1 - 0.999))

@@ -425,7 +425,7 @@ class VolumeFilter:
             )
         plane_name = self.settings.plane_prefix.format(n=self.z) + ".tif"
         f_path = os.path.join(self.settings.plane_directory, plane_name)
-        tifffile.imwrite(f_path, plane.T)
+        tifffile.imwrite(f_path, plane)
 
     def get_results(self, settings: DetectionSettings) -> List[Cell]:
         """

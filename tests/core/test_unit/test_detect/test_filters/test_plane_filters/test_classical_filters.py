@@ -18,10 +18,10 @@ def filtered_data_array(repo_data_path):
         / "signal"
     )
     filtered_path = (
-        repo_data_path / "integration" / "detection" / "2d_filter" / "signal"
+        repo_data_path / "integration" / "detection" / "filter" / "2d_filter"
     )
     tiles_path = (
-        repo_data_path / "integration" / "detection" / "2d_filter" / "tiles"
+        repo_data_path / "integration" / "detection" / "filter" / "tiles"
     )
     return (
         read_with_dask(str(data_path)),
