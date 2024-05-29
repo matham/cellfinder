@@ -10,12 +10,12 @@ from cellfinder.core.detect.filters.setup_filters import DetectionSettings
 @pytest.mark.parametrize(
     "in_dtype,filter_dtype,detect_dtype",
     [
-        (np.uint8, np.float32, np.uint32),
-        (np.uint16, np.float32, np.uint32),
-        (np.uint32, np.float64, np.uint64),
-        (np.int8, np.float32, np.uint32),
-        (np.int16, np.float32, np.uint32),
-        (np.int32, np.float64, np.uint64),
+        (np.uint8, np.float32, np.uint8),
+        (np.uint16, np.float32, np.uint16),
+        (np.uint32, np.float64, np.uint32),
+        (np.int8, np.float32, np.uint8),
+        (np.int16, np.float32, np.uint16),
+        (np.int32, np.float64, np.uint32),
         (np.float32, np.float32, np.uint32),
         (np.float64, np.float64, np.uint64),
     ],
@@ -71,9 +71,8 @@ def test_bad_input_dtype(in_dtype):
     with pytest.raises(TypeError):
         assert settings.filtering_dtype
 
-    with pytest.raises(TypeError):
-        # it depends on filtering_dtype used, which raises exception
-        assert settings.detection_dtype
+    # detection type should be available
+    assert settings.detection_dtype
 
 
 def test_pickle_settings():

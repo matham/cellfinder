@@ -34,6 +34,10 @@ class DetectionSettings:
     """
     The numpy data type of the input data that will be passed to the filtering
     pipeline.
+
+    Throughout filtering at key stages, the data range is kept such
+    that we can convert the data back to this data type without having to
+    scale.
     """
 
     plane_shape: Tuple[int, int] = (1, 1)
@@ -211,11 +215,17 @@ class DetectionSettings:
         Currently, it's one of the unsigned ints.
         """
         # filtering data type is signed. But, filtering should only produce
-        # values >= 0. So unsigned is safe
-        working_dtype = self.filtering_dtype
-        # filtering type is at most float64. So it'll always fit in uint64
-        # also
+        # values >= 0. So unsigned is safe.
+        # Due to the values used for threshold etc, it'll always fit into the
+        # original data type without scaling.
+        # Filtering type is at most float64. So it'll always fit in uint64 at
+        # least (otherwise it would have failed at the filtering step).
+        working_dtype = self.plane_original_np_dtype
         max_int = get_max_possible_int_value(working_dtype)
+        if max_int <= get_max_possible_int_value(np.uint8):
+            return np.uint8
+        if max_int <= get_max_possible_int_value(np.uint16):
+            return np.uint16
         if max_int <= get_max_possible_int_value(np.uint32):
             return np.uint32
         assert max_int <= get_max_possible_int_value(
@@ -229,7 +239,7 @@ class DetectionSettings:
         The maximum value used to clip the input to, as well as the value to
         which the filtered data is scaled to.
         """
-        return get_max_possible_int_value(self.filtering_dtype) - 2
+        return get_max_possible_int_value(self.plane_original_np_dtype) - 2
 
     @cached_property
     def threshold_value(self) -> int:
@@ -237,14 +247,14 @@ class DetectionSettings:
         The value used to set bright areas as indicating it's above a
         brightness threshold.
         """
-        return get_max_possible_int_value(self.filtering_dtype) - 1
+        return get_max_possible_int_value(self.plane_original_np_dtype) - 1
 
     @cached_property
     def soma_centre_value(self) -> int:
         """
         The value used to mark bright areas as the location of a soma center.
         """
-        return get_max_possible_int_value(self.filtering_dtype)
+        return get_max_possible_int_value(self.plane_original_np_dtype)
 
     @property
     def tile_height(self) -> int:

@@ -212,8 +212,8 @@ def split_cells(
         cell_points (np.ndarray): Array of cell points with shape (N, 3),
             where N is the number of cell points and each point is represented
             by its x, y, and z coordinates.
-        settings DetectionSettings: The settings to use for splitting. It is
-        modified inplace.
+        settings (DetectionSettings) : The settings to use for splitting. It is
+            modified inplace.
 
     Returns:
         np.ndarray: Array of absolute cell centres with shape (M, 3),

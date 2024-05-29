@@ -393,6 +393,8 @@ class VolumeFilter:
                 return
 
             # convert plane to the type needed by detection system
+            # we should not need scaling because throughout
+            # filtering we make sure result fits in this data type
             middle_planes, token = msg
             middle_planes = middle_planes.astype(detection_dtype)
 

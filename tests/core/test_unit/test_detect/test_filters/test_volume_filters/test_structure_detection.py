@@ -174,9 +174,9 @@ def test_detection(
     if dtype in (np.uint64, np.int64):
         with pytest.raises(TypeError):
             # should raise error for uint64 - too big for float64
-            detection_dtype = settings.detection_dtype
+            filtering_dtype = settings.filtering_dtype
             # do something with so linter doesn't complain
-            assert detection_dtype
+            assert filtering_dtype
         return
 
     detection_dtype = settings.detection_dtype

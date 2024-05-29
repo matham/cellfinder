@@ -187,6 +187,7 @@ class PeakEnchancer:
             padding_mode="reflect",
             bias=False,
             device=torch_device,
+            dtype=dtype,
         )
         module.weight.copy_(weight)
 
@@ -228,6 +229,7 @@ class PeakEnchancer:
             padding_mode="reflect",
             bias=False,
             device=torch_device,
+            dtype=dtype,
         )
         module.weight.copy_(gauss_kernel)
 
@@ -251,6 +253,7 @@ class PeakEnchancer:
             padding_mode="reflect",
             bias=False,
             device=torch_device,
+            dtype=dtype,
         )
         module.weight.copy_(lap_kernel)
 

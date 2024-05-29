@@ -4,6 +4,7 @@ from math import isclose
 import brainglobe_utils.IO.cells as cell_io
 import numpy as np
 import pytest
+import torch
 from brainglobe_utils.cells.cells import Cell
 from brainglobe_utils.general.system import get_num_processes
 from brainglobe_utils.IO.image.load import read_with_dask
@@ -193,10 +194,9 @@ def test_data_dimension_error(ndim):
     ],
 )
 def test_signal_data_types(synthetic_single_spot, no_free_cpus, dtype, device):
-    import torch
 
     if device == "cuda" and not torch.cuda.is_available():
-        pytest.xfail("Cuda is not available")
+        pytest.skip("Cuda is not available")
 
     signal_array, background_array, center = synthetic_single_spot
     signal_array = signal_array.astype(dtype)
@@ -227,7 +227,6 @@ def test_signal_data_types(synthetic_single_spot, no_free_cpus, dtype, device):
 def test_detection_scipy_torch(
     synthetic_single_spot, no_free_cpus, use_scipy, device
 ):
-    import torch
 
     if device == "cuda" and not torch.cuda.is_available():
         pytest.xfail("Cuda is not available")
@@ -258,7 +257,6 @@ def test_detection_cluster_splitting(
     Test filtering/detection on cpu and cuda. Because splitting is only on cpu
     so make sure if detection is on cuda, splitting still works.
     """
-    import torch
 
     if device == "cuda" and not torch.cuda.is_available():
         pytest.xfail("Cuda is not available")

@@ -25,8 +25,10 @@ from cellfinder.core import logger, types
 from cellfinder.core.detect.filters.plane import TileProcessor
 from cellfinder.core.detect.filters.setup_filters import DetectionSettings
 from cellfinder.core.detect.filters.volume.volume_filter import VolumeFilter
+from cellfinder.core.tools.tools import inference_wrapper
 
 
+@inference_wrapper
 def main(
     signal_array: types.array,
     start_plane: int = 0,
@@ -207,13 +209,10 @@ def main(
     orig_n_threads = torch.get_num_threads()
     torch.set_num_threads(settings.n_torch_comp_threads)
 
-    with torch.inference_mode(True):
-        # process the data
-        mp_3d_filter.process(
-            mp_tile_processor, signal_array, callback=callback
-        )
+    # process the data
+    mp_3d_filter.process(mp_tile_processor, signal_array, callback=callback)
 
-        cells = mp_3d_filter.get_results(splitting_settings)
+    cells = mp_3d_filter.get_results(splitting_settings)
 
     torch.set_num_threads(orig_n_threads)
 
