@@ -156,6 +156,8 @@ def main(
 
     torch_device = torch_device.lower()
     batch_size = max(batch_size, 1)
+    # brainmapper can pass them in as str
+    voxel_sizes = list(map(float, voxel_sizes))
 
     settings = DetectionSettings(
         plane_shape=signal_array.shape[1:],
