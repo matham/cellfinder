@@ -240,7 +240,7 @@ class CellDetector:
         """
         return self.structures_to_cells()
 
-    def get_structures(self) -> Dict[sid_numba_type, np.ndarray]:
+    def get_structures(self) -> Dict[int, np.ndarray]:
         """
         Gets the structures as a dict of structure IDs mapped to the 2D array
         of structure points (points vs x, y, z columns).
@@ -251,7 +251,9 @@ class CellDetector:
             # `item = np.array(points, dtype=vol_np_type)` so we need to create
             # array and then fill in the point
             item = np.empty((len(points), 3), dtype=vol_np_type)
-            d[sid] = item
+            # need to cast to int64, otherwise when dict is used we can get
+            # warnings as in numba issue #8829 b/c it assumes it's uint64
+            d[types.int64(sid)] = item
 
             for i, point in enumerate(points):
                 item[i, :] = point

@@ -398,12 +398,6 @@ class VolumeFilter:
             # filtering we make sure result fits in this data type
             middle_planes, token = msg
             detection_middle_planes = detection_converter(middle_planes)
-            print(
-                np.min(middle_planes),
-                np.max(middle_planes),
-                np.min(detection_middle_planes),
-                np.max(detection_middle_planes),
-            )
 
             logger.debug(f"🏫 Detecting structures for planes {self.z}+")
             for plane, detection_plane in zip(
