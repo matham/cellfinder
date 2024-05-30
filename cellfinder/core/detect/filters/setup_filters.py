@@ -37,7 +37,28 @@ class DetectionSettings:
 
     Throughout filtering at key stages, the data range is kept such
     that we can convert the data back to this data type without having to
-    scale.
+    scale. I.e. the min/max of the data fits in this data type.
+
+    Except for the cell detection stage, in that stage the data range can be
+    larger because the values are cell IDs and not intensity data anymore.
+
+    During structure splitting, we do just 3d filtering/cell detection. This is
+    again the data type used as input to the filtering.
+    """
+
+    detection_dtype: Type[np.number] = np.uint64
+    """
+    The numpy data type that the cell detection code expects our filtered
+    data to be in.
+
+    After filtering, where the voxels are intensity values, we pass the data
+    to cell detection where the voxels turns into cell IDs. So the data type
+    needs to be large enough to support the number of cells in the data.
+
+    To get the data from the filtering data type to the detection data type
+    use `detection_data_converter_func`.
+
+    Defaults to `uint64`.
     """
 
     plane_shape: Tuple[int, int] = (1, 1)
@@ -58,7 +79,7 @@ class DetectionSettings:
     voxel_sizes: Tuple[float, float, float] = (1.0, 1.0, 1.0)
     """
     Tuple of voxel sizes in each dimension (z, y, x). We use this to convert
-    from um to pixel sizes.
+    from `um` to pixel sizes.
     """
 
     soma_spread_factor: float = 1.4
@@ -73,7 +94,7 @@ class DetectionSettings:
     max_cluster_size_um3: float = 100_000
     """
     Maximum size of a cluster (bright area) that will be processed, in um.
-    Larger bright areas are skipped.
+    Larger bright areas are skipped as artifacts.
     """
 
     ball_xy_size_um: float = 6
@@ -93,17 +114,17 @@ class DetectionSettings:
 
     ball_overlap_fraction: float = 0.6
     """
-    Fraction of overlap between the bright area and the spherical kernel,
-    to be considered a single ball.
+    Fraction of overlap between a bright area and the spherical kernel,
+    for the area to be considered a single ball.
     """
 
     log_sigma_size: float = 0.2
-    """Size of the sigma for the Gaussian filter."""
+    """Size of the sigma for the 2d Gaussian filter."""
 
     n_sds_above_mean_thresh: float = 10
     """
-    Number of standard deviations above the mean to use for a threshold to
-    define bright areas.
+    Number of standard deviations above the mean intensity to use for a
+    threshold to define bright areas. Below it, it's not considered bright.
     """
 
     outlier_keep: bool = False
@@ -113,7 +134,11 @@ class DetectionSettings:
     """Whether to keep artifact structures during detection."""
 
     save_planes: bool = False
-    """Whether to save the planes during detection."""
+    """
+    Whether to save the 2d/3d filtered planes during after filtering.
+
+    It is saved as tiffs of data type `plane_original_np_dtype`.
+    """
 
     plane_directory: Optional[str] = None
     """Directory path where to save the planes, if saving."""
@@ -147,16 +172,17 @@ class DetectionSettings:
 
     torch_device: str = "cpu"
     """
-    The device on which to run the computation.
+    The device on which to run the 2d and/or 3d filtering.
 
-    Either "cpu" or PyTorch's GPU device name, such as "cuda" to run on the
-    first GPU.
+    Either `"cpu"` or PyTorch's GPU device name, such as `"cuda"` or `"cuda:0"`
+    to run on the first GPU.
     """
 
     n_free_cpus: int = 2
     """
     Number of free CPU cores to keep available and not use during parallel
-    processing.
+    processing. Internally, more cores may actually be used by the system,
+    which we don't control.
     """
 
     n_splitting_iter: int = 10
@@ -182,6 +208,9 @@ class DetectionSettings:
         A callable that takes a numpy array of type
         `plane_original_np_dtype` and converts it into the `filtering_dtype`
         type.
+
+        We use this to convert the input data into the data type used for
+        filtering.
         """
         return get_data_converter(
             self.plane_original_np_dtype, self.filtering_dtype
@@ -191,7 +220,10 @@ class DetectionSettings:
     def filtering_dtype(self) -> Type[np.floating]:
         """
         The numpy data type that the 2d/3d filters expect our data to be in.
-        The data is in the form of torch tensors, but of this data type.
+        Use `filter_data_converter_func` to convert to this type.
+
+        The data will be used in the form of torch tensors, but it'll be this
+        data type.
 
         Currently, it's either float32 or float64.
         """
@@ -207,37 +239,12 @@ class DetectionSettings:
         raise TypeError("Input array data type is too big for a float64")
 
     @cached_property
-    def detection_dtype(self) -> Type[np.unsignedinteger]:
-        """
-        The numpy data type that the cell detection code expect our filtered
-        data to be in.
-
-        Currently, it's one of the unsigned ints.
-        """
-        # filtering data type is signed. But, filtering should only produce
-        # values >= 0. So unsigned is safe.
-        # Due to the values used for threshold etc, it'll always fit into the
-        # original data type without scaling.
-        # Filtering type is at most float64. So it'll always fit in uint64 at
-        # least (otherwise it would have failed at the filtering step).
-        working_dtype = self.plane_original_np_dtype
-        max_int = get_max_possible_int_value(working_dtype)
-        if max_int <= get_max_possible_int_value(np.uint8):
-            return np.uint8
-        if max_int <= get_max_possible_int_value(np.uint16):
-            return np.uint16
-        if max_int <= get_max_possible_int_value(np.uint32):
-            return np.uint32
-        assert max_int <= get_max_possible_int_value(
-            np.uint64
-        ), "filtering_dtype should be at most float64"
-        return np.uint64
-
-    @cached_property
     def clipping_value(self) -> int:
         """
         The maximum value used to clip the input to, as well as the value to
-        which the filtered data is scaled to.
+        which the filtered data is scaled to during filtering.
+
+        This ensures the filtered data fits in the `plane_original_np_dtype`.
         """
         return get_max_possible_int_value(self.plane_original_np_dtype) - 2
 
@@ -245,16 +252,52 @@ class DetectionSettings:
     def threshold_value(self) -> int:
         """
         The value used to set bright areas as indicating it's above a
-        brightness threshold.
+        brightness threshold, during 2d filtering.
         """
         return get_max_possible_int_value(self.plane_original_np_dtype) - 1
 
     @cached_property
     def soma_centre_value(self) -> int:
         """
-        The value used to mark bright areas as the location of a soma center.
+        The value used to mark bright areas as the location of a soma center,
+        during 3d filtering.
         """
         return get_max_possible_int_value(self.plane_original_np_dtype)
+
+    @cached_property
+    def detection_soma_centre_value(self) -> int:
+        """
+        The value used to mark bright areas as the location of a soma center,
+        during detection. See `detection_data_converter_func`.
+        """
+        return get_max_possible_int_value(self.detection_dtype)
+
+    @cached_property
+    def detection_data_converter_func(
+        self,
+    ) -> Callable[[np.ndarray], np.ndarray]:
+        """
+        A callable that takes a numpy array of type
+        `filtering_dtype` and converts it into the `detection_dtype`
+        type.
+
+        It takes the filtered data where somas are marked with the
+        `soma_centre_value` and returns a volume of the same size where the
+        somas are marked with `detection_soma_centre_value`. Other voxels are
+        zeroed.
+
+        We use this to convert the output of the 3d filter into the data
+        passed to cell detection.
+        """
+
+        def convert_for_cell_detection(data: np.ndarray) -> np.ndarray:
+            detection_data = np.zeros_like(data, dtype=self.detection_dtype)
+            detection_data[data == self.soma_centre_value] = (
+                self.detection_soma_centre_value
+            )
+            return detection_data
+
+        return convert_for_cell_detection
 
     @property
     def tile_height(self) -> int:
@@ -296,7 +339,7 @@ class DetectionSettings:
     @property
     def n_torch_comp_threads(self) -> int:
         """
-        The maximum practical number of process we should use during filtering,
+        The maximum number of process we should use during filtering,
         using pytorch.
 
         This is less than `n_processes` because we account for thread
@@ -308,14 +351,16 @@ class DetectionSettings:
         n = max(1, self.n_processes - self.batch_size - 2)
         return min(n, MAX_TORCH_COMP_THREADS)
 
+    @property
+    def in_plane_pixel_size(self) -> float:
+        """Returns the average in-plane (xy) um/pixel."""
+        voxel_sizes = self.voxel_sizes
+        return (voxel_sizes[2] + voxel_sizes[1]) / 2
+
     @cached_property
     def soma_diameter(self) -> int:
         """The `soma_diameter_um`, but in voxels."""
-        voxel_sizes = self.voxel_sizes
-        mean_in_plane_pixel_size = 0.5 * (
-            float(voxel_sizes[2]) + float(voxel_sizes[1])
-        )
-        return int(round(self.soma_diameter_um / mean_in_plane_pixel_size))
+        return int(round(self.soma_diameter_um / self.in_plane_pixel_size))
 
     @cached_property
     def max_cluster_size(self) -> int:
@@ -331,17 +376,17 @@ class DetectionSettings:
     @cached_property
     def ball_xy_size(self) -> int:
         """The `ball_xy_size_um`, but in voxels."""
-        voxel_sizes = self.voxel_sizes
-        mean_in_plane_pixel_size = 0.5 * (
-            float(voxel_sizes[2]) + float(voxel_sizes[1])
-        )
-        return int(round(self.ball_xy_size_um / mean_in_plane_pixel_size))
+        return int(round(self.ball_xy_size_um / self.in_plane_pixel_size))
+
+    @property
+    def z_pixel_size(self) -> float:
+        """Returns the um/pixel in the z direction."""
+        return self.voxel_sizes[0]
 
     @cached_property
     def ball_z_size(self) -> int:
         """The `ball_z_size_um`, but in voxels."""
-        voxel_sizes = self.voxel_sizes
-        ball_z_size = int(round(self.ball_z_size_um / float(voxel_sizes[0])))
+        ball_z_size = int(round(self.ball_z_size_um / self.z_pixel_size))
 
         if not ball_z_size:
             raise ValueError(
@@ -368,9 +413,9 @@ class DetectionSettings:
     @property
     def plane_prefix(self) -> str:
         """
-        The prefix of the filename to use to save filtered planes.
+        The prefix of the filename to use to save the 2d/3d filtered planes.
 
-        To save plane `k`, do `plane_prefix.format(n=k)`. You can then append
+        To save plane `k`, do `plane_prefix.format(n=k)`. You can then add
         an extension etc.
         """
         n = max(4, int(math.ceil(math.log10(self.n_planes))))

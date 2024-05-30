@@ -156,42 +156,58 @@ test_data = [
     ],
 )
 @pytest.mark.parametrize("pixels,expected_coords", test_data)
+@pytest.mark.parametrize(
+    "detect_dtype",
+    [
+        np.uint64,
+        np.int64,
+        np.uint8,
+        np.uint16,
+        np.uint32,
+        np.int8,
+        np.int16,
+        np.int32,
+        np.float32,
+        np.float64,
+    ],
+)
 def test_detection(
     dtype: Type[np.number],
     pixels: List[Tuple[int, int, int]],
     expected_coords: Dict[int, List[Point]],
+    detect_dtype: Type[np.number],
 ) -> None:
     # original dtype is the dtype of the original data. filtering_dtype
     # is the data type used during ball filtering. Currently, it can be at most
     # float64. So original dtype cannot support 64-bit ints because it won't
     # fit in float64.
-    # detection_dtype is the type that must be used during detection to fit the
-    # values used during filtering (i.e. settings.soma_centre_value). It is
-    # unsigned (although the cell detection code actually does support
-    # float/signed).
-    settings = DetectionSettings(plane_original_np_dtype=dtype)
+    # detection_dtype is the type that must be used during detection to fit a
+    # count of the number of cells present
+    settings = DetectionSettings(
+        plane_original_np_dtype=dtype, detection_dtype=detect_dtype
+    )
 
+    # should raise error for (u)int64 - too big for float64 so can't filter
     if dtype in (np.uint64, np.int64):
         with pytest.raises(TypeError):
-            # should raise error for uint64 - too big for float64
             filtering_dtype = settings.filtering_dtype
             # do something with so linter doesn't complain
             assert filtering_dtype
         return
 
-    detection_dtype = settings.detection_dtype
-    assert np.issubdtype(detection_dtype, np.unsignedinteger)
-
-    # pretend we got the data from filtering and converted to detection type
-    data = np.zeros((depth, height, width), dtype=settings.detection_dtype)
-    detector = CellDetector(height, width, 0, 0)
-    # similar to numba issue #9576 we can't pass to init a large value once
-    # a 32 bit type was used for detector. So pass it with custom method
-    detector._set_soma(settings.soma_centre_value)
-
+    # pretend we got the intensity data from filtering
+    data = np.zeros((depth, height, width), dtype=settings.filtering_dtype)
     # This is the value used by BallFilter to mark pixels
     for pix in pixels:
         data[pix] = settings.soma_centre_value
+
+    # convert intensity data to values expected by detector
+    data = settings.detection_data_converter_func(data)
+
+    detector = CellDetector(height, width, 0, 0)
+    # similar to numba issue #9576 we can't pass to init a large value once
+    # a 32 bit type was used for detector. So pass it with custom method
+    detector._set_soma(settings.detection_soma_centre_value)
 
     previous_plane = None
     for plane in data:
@@ -220,6 +236,7 @@ def test_add_points():
 
 
 def test_change_plane_size():
+    # check that changing plane size errors out
     detector = CellDetector(50, 50, 0, 5000)
     with pytest.raises(ValueError):
         detector.process(np.zeros((100, 50), dtype=np.uint32), None)

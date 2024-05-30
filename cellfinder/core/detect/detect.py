@@ -180,15 +180,27 @@ def main(
         torch_device=torch_device,
     )
 
-    # replicate the settings specific to splitting
-    splitting_settings = DetectionSettings(**dataclasses.asdict(settings))
-    splitting_settings.ball_z_size = split_ball_z_size
-    splitting_settings.ball_xy_size = split_ball_xy_size
-    splitting_settings.ball_overlap_fraction = split_ball_overlap_fraction
-    splitting_settings.soma_diameter = split_soma_diameter
+    # replicate the settings specific to splitting, before we access anything
+    # of the original settings, causing cached properties
+    kwargs = dataclasses.asdict(settings)
+    kwargs["ball_z_size_um"] = split_ball_z_size * settings.z_pixel_size
+    kwargs["ball_xy_size_um"] = (
+        split_ball_xy_size * settings.in_plane_pixel_size
+    )
+    kwargs["ball_overlap_fraction"] = split_ball_overlap_fraction
+    kwargs["soma_diameter_um"] = (
+        split_soma_diameter * settings.in_plane_pixel_size
+    )
     # always run on cpu because copying to gpu overhead is likely slower than
     # any benefit for detection on smallish volumes
-    splitting_settings.torch_device = "cpu"
+    kwargs["torch_device"] = "cpu"
+    # for splitting, we only do 3d filtering. Its input is a zero volume
+    # with cell voxels marked with threshold_value. So just use float32
+    # for input because the filters will also use float(32). So there will
+    # not be need to convert the input a different dtype before passing to
+    # the filters.
+    kwargs["plane_original_np_dtype"] = np.float32
+    splitting_settings = DetectionSettings(**kwargs)
 
     # Create 3D analysis filter
     mp_3d_filter = VolumeFilter(settings=settings)
@@ -211,7 +223,6 @@ def main(
 
     # process the data
     mp_3d_filter.process(mp_tile_processor, signal_array, callback=callback)
-
     cells = mp_3d_filter.get_results(splitting_settings)
 
     torch.set_num_threads(orig_n_threads)

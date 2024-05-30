@@ -28,6 +28,15 @@ def set_device_arm_macos_ci():
         force_cpu()
 
 
+def pytest_collection_modifyitems(session, config, items: list):
+    # this hook is called by pytest after test collection. Move the
+    # test_detection test to the end because if it's run in the middle we run
+    # into numba issue #9576 and the tests fail
+    items1 = [t for t in items if not t.name.startswith("test_detection[")]
+    items2 = [t for t in items if t.name.startswith("test_detection[")]
+    items[:] = items1 + items2
+
+
 def mark_sphere(
     data_zyx: np.ndarray, center_xyz, radius: int, fill_value: int
 ) -> None:

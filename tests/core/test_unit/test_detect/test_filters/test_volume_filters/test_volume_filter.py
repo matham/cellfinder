@@ -145,14 +145,15 @@ def test_filtered_plane_range(mocker: MockerFixture):
 
     # input data in range (-500, 500)
     data = ((np.random.random((6, 50, 50)) - 0.5) * 1000).astype(np.float32)
+    data[1:3, 25:30, 25:30] = 5000
     main(signal_array=data)
 
     calls = detector.return_value.process.call_args_list
     assert len(calls)
     for call in calls:
         plane, *_ = call.args
-        # should have at least background and foreground pixels
-        assert len(np.unique(plane)) >= 2
+        # should have either zero or soma value or both
+        assert len(np.unique(plane)) in (1, 2)
         assert np.min(plane) >= 0
 
 
@@ -171,10 +172,10 @@ def test_saving_filtered_planes(tmp_path):
     # we're skipping first and last plane that isn't filtered due to kernel
     assert len(files) == 4
     assert files == [
-        "plane_0001.tif",
         "plane_0002.tif",
         "plane_0003.tif",
         "plane_0004.tif",
+        "plane_0005.tif",
     ]
 
 

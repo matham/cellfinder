@@ -48,11 +48,13 @@ def coords_to_volume(
 
     The volume is then transposed and returned in the Z, Y, X order.
     """
+    # it's faster doing the work in numpy and then returning as torch array,
+    # than doing the work in torch
     ball_diameter = ball_radius * 2
     # Expanded to ensure the ball fits even at the border
     expanded_shape = [dim_size + ball_diameter for dim_size in volume_shape]
     # volume is now x, y, z order
-    volume = torch.zeros(expanded_shape, dtype=dtype)
+    volume = np.zeros(expanded_shape, dtype=dtype)
 
     x_min, y_min, z_min = xs.min(), ys.min(), zs.min()
 
@@ -65,7 +67,9 @@ def coords_to_volume(
     # set each point as the center with a value of threshold
     for rel_x, rel_y, rel_z in zip(relative_xs, relative_ys, relative_zs):
         volume[rel_x, rel_y, rel_z] = threshold_value
-    return volume.moveaxis(0, 2)
+
+    volume = volume.swapaxes(0, 2)
+    return torch.from_numpy(volume)
 
 
 def ball_filter_imgs(
@@ -86,7 +90,7 @@ def ball_filter_imgs(
         The 2D array of cell centres (N, 3) - X, Y, Z order.
 
     """
-    detection_dtype = settings.detection_dtype
+    detection_convert = settings.detection_data_converter_func
     batch_size = settings.batch_size
 
     # make sure volume is not less than kernel etc
@@ -114,7 +118,7 @@ def ball_filter_imgs(
         settings.plane_height,
         settings.plane_width,
         start_z=start_z,
-        soma_centre_value=settings.soma_centre_value,
+        soma_centre_value=settings.detection_soma_centre_value,
     )
 
     previous_plane = None
@@ -135,7 +139,7 @@ def ball_filter_imgs(
             start_z += n
 
             # convert to type needed for detection
-            middle_planes = middle_planes.astype(detection_dtype)
+            middle_planes = detection_convert(middle_planes)
             for plane in middle_planes:
                 previous_plane = cell_detector.process(plane, previous_plane)
 
@@ -242,21 +246,24 @@ def split_cells(
     original_bounding_cuboid_shape = get_shape(xs, ys, zs)
 
     ball_radius = settings.ball_xy_size // 2
-    dtype = getattr(torch, settings.filtering_dtype.__name__)
-    # volume is now z, y, x order
+    # they should be the same dtype so as to not need a conversion before
+    # passing the input data with marked cells to the filters (we currently
+    # set both to float32)
+    assert settings.filtering_dtype == settings.plane_original_np_dtype
+    # volume will now be z, y, x order
     vol = coords_to_volume(
         xs,
         ys,
         zs,
         volume_shape=original_bounding_cuboid_shape,
         ball_radius=ball_radius,
-        dtype=dtype,
+        dtype=settings.filtering_dtype,
         threshold_value=settings.threshold_value,
     )
 
-    # get an estimate of how much memory processing a single batch of planes
-    # takes. For this reduced volume, our batch will be such that it uses at
-    # most that much memory
+    # get an estimate of how much memory processing a single batch of original
+    # input planes takes. For this much smaller volume, our batch will be such
+    # that it uses at most that much memory
     total_vol_size = (
         settings.plane_height * settings.plane_width * settings.batch_size
     )

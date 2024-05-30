@@ -105,7 +105,7 @@ class VolumeFilter:
             settings.plane_height,
             settings.plane_width,
             start_z=self.z,
-            soma_centre_value=settings.soma_centre_value,
+            soma_centre_value=settings.detection_soma_centre_value,
         )
         # make sure we load enough data to filter. Otherwise, we won't be ready
         # to filter and the data loading thread will wait for data to be
@@ -376,7 +376,8 @@ class VolumeFilter:
         through the cell detection system. Also saves the planes as needed.
         """
         detector = self.cell_detector
-        detection_dtype = self.settings.detection_dtype
+        original_dtype = self.settings.plane_original_np_dtype
+        detection_converter = self.settings.detection_data_converter_func
         save_planes = self.settings.save_planes
         previous_plane = None
 
@@ -396,14 +397,24 @@ class VolumeFilter:
             # we should not need scaling because throughout
             # filtering we make sure result fits in this data type
             middle_planes, token = msg
-            middle_planes = middle_planes.astype(detection_dtype)
+            detection_middle_planes = detection_converter(middle_planes)
+            print(
+                np.min(middle_planes),
+                np.max(middle_planes),
+                np.min(detection_middle_planes),
+                np.max(detection_middle_planes),
+            )
 
             logger.debug(f"🏫 Detecting structures for planes {self.z}+")
-            for plane in middle_planes:
+            for plane, detection_plane in zip(
+                middle_planes, detection_middle_planes
+            ):
                 if save_planes:
-                    self.save_plane(plane)
+                    self.save_plane(plane.astype(original_dtype))
 
-                previous_plane = detector.process(plane, previous_plane)
+                previous_plane = detector.process(
+                    detection_plane, previous_plane
+                )
 
                 if callback is not None:
                     callback(self.z)
@@ -423,7 +434,8 @@ class VolumeFilter:
             raise ValueError(
                 "plane_directory must be set to save planes to file"
             )
-        plane_name = self.settings.plane_prefix.format(n=self.z) + ".tif"
+        # self.z is zero based, we should save names as 1-based.
+        plane_name = self.settings.plane_prefix.format(n=self.z + 1) + ".tif"
         f_path = os.path.join(self.settings.plane_directory, plane_name)
         tifffile.imwrite(f_path, plane)
 

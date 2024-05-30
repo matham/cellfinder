@@ -80,7 +80,7 @@ def test_main_bad_or_default_args(mocked_main):
     assert settings.plane_original_np_dtype == np.uint16
     # for uint16 input we should use float32
     assert settings.filtering_dtype == np.float32
-    assert settings.detection_dtype == np.uint16
+    assert settings.detection_dtype == np.uint64
     assert settings.end_plane == 5
     assert settings.n_planes == 5
     assert settings.batch_size == 4  # cpu default is 4
