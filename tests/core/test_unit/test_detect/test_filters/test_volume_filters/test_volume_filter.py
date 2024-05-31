@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 import torch
+from brainglobe_utils.IO.cells import get_cells_xml
 from pytest_mock.plugin import MockerFixture
 
 from cellfinder.core.detect.detect import main
@@ -195,7 +196,12 @@ def test_saving_filtered_planes_no_dir():
     "torch_device,use_scipy", [("cpu", False), ("cpu", True), ("cuda", False)]
 )
 def test_3d_filtering_saved(
-    filtered_data_array, torch_device, use_scipy, no_free_cpus, tmp_path
+    filtered_data_array,
+    torch_device,
+    use_scipy,
+    no_free_cpus,
+    tmp_path,
+    repo_data_path,
 ):
     # test that the full 2d/3d matches the saved data
     if torch_device == "cuda" and not torch.cuda.is_available():
@@ -211,7 +217,7 @@ def test_3d_filtering_saved(
 
     path = tmp_path / "3d_filter"
     path.mkdir()
-    main(
+    cells = main(
         signal_array=data,
         voxel_sizes=(5, 2, 2),
         soma_diameter=16,
@@ -252,3 +258,16 @@ def test_3d_filtering_saved(
     frac = diff / n_pixels
     # 100% same
     assert np.all(np.isclose(frac, 0))
+
+    # check that the resulting cells are the same
+    cells_path = (
+        repo_data_path
+        / "integration"
+        / "detection"
+        / "filter"
+        / "detected_cells.xml"
+    )
+    original_cells = get_cells_xml(str(cells_path), cells_only=False)
+
+    assert len(original_cells) == len(cells)
+    assert set(original_cells) == set(cells)
