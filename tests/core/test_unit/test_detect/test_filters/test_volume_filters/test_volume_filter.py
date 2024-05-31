@@ -6,6 +6,7 @@ from pytest_mock.plugin import MockerFixture
 from cellfinder.core.detect.detect import main
 from cellfinder.core.tools.IO import read_with_dask
 from cellfinder.core.tools.threading import ExecutionFailure
+from cellfinder.core.tools.tools import get_max_possible_int_value
 
 # even though we are testing volume filter as unit test, we are running through
 # main and mocking VolumeFilter because that's the easiest way to instantiate
@@ -224,11 +225,24 @@ def test_3d_filtering_saved(
         n_sds_above_mean_thresh=10,
         save_planes=True,
         plane_directory=str(path),
+        batch_size=1,
     )
 
     filtered_our = np.asarray(read_with_dask(str(path)))
     assert filtered_our.shape == filtered.shape
     assert filtered_our.dtype == np.uint16
+    # we need to rescale our data because the original data saved to uint32
+    # (even though it fit in uint16), so rescale the max value the soma was
+    # saved as, to make comparison better
+    filtered_our = filtered_our.astype(np.uint32)
+    max16 = get_max_possible_int_value(np.uint16)
+    max32 = get_max_possible_int_value(np.uint32)
+    filtered_our[filtered_our == max16] = max32
+
+    # we only care about the soma value as only that is used in the next step
+    # in cell detection, so set everything else to zero
+    filtered_our[filtered_our != max16] = 0
+    filtered[filtered_our != max32] = 0
 
     # the number of pixels per plane that are different
     diff = np.sum(np.sum(filtered_our != filtered, axis=2), axis=1)
@@ -236,5 +250,5 @@ def test_3d_filtering_saved(
     n_pixels = data.shape[1] * data.shape[2]
     # fraction pixels that are different
     frac = diff / n_pixels
-    # 99.9% same
-    assert np.all(np.less(frac, 1 - 0.999))
+    # 100% same
+    assert np.all(np.isclose(frac, 0))

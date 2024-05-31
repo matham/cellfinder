@@ -318,6 +318,8 @@ class BallFilter:
         num_process = self.volume.shape[0] - self.kernel_z_size + 1
         height, width = self.volume.shape[1:]
         middle = self.middle_z_idx
+        kernel = self.kernel
+        num_z = kernel.shape[2]
 
         # threshold volume so it's zero/one. And add two dims at start so
         # it's 11ZYX
@@ -325,44 +327,52 @@ class BallFilter:
             (self.volume >= self.THRESHOLD_VALUE)
             .unsqueeze(0)
             .unsqueeze(0)
-            .type(self.kernel.dtype)
+            .type(kernel.dtype)
         )
-        # spherical kernel is symmetric so convolution=correlation. Use
-        # threshold mask over the kernel to sum kernel voxels that are bright
-        overlap = F.conv3d(volume_tresh, self.kernel, stride=1)[0, 0, :, :, :]
-        overlaps = overlap > self.overlap_threshold
 
-        # edit only z's that are processed (e.g. with kernel=3, depth=5,
-        # only 3 planes are processed). Also, only edit the volume that is
-        # valid - conv excludes edges so we only edit the planes without edges
-        height_valid, width_valid = overlaps.shape[1:]
-        height_offset = (height - height_valid) // 2
-        width_offset = (width - width_valid) // 2
-        sub_volume = self.volume[
-            middle : middle + num_process,
-            height_offset : height_offset + height_valid,
-            width_offset : width_offset + width_valid,
-        ]
+        # we do a plane at a time, volume: i:i+num_z, for plane i+middle
+        for i in range(num_process):
+            # spherical kernel is symmetric so convolution=correlation. Use
+            # binary threshold mask over the kernel to sum the value of the
+            # kernel at voxels that are bright
+            overlap = F.conv3d(
+                volume_tresh[:, :, i : i + num_z, :, :],
+                kernel,
+                stride=1,
+                padding="valid",
+            )[0, 0, 0, :, :]
+            overlaps = overlap > self.overlap_threshold
 
-        # do we use tile masks?
-        if self.inside_brain_tiles is not None:
-            # unfold tiles to cover the full voxel area each tile covers
-            inside = (
-                self.inside_brain_tiles[middle : middle + num_process, :, :]
-                .repeat_interleave(self.tile_step_height, dim=1)
-                .repeat_interleave(self.tile_step_width, dim=2)
-            )
-            inside = inside[
-                :,
+            # only edit the volume that is valid - conv excludes edges so we
+            # only edit the plane parts returned by conv3d
+            height_valid, width_valid = overlaps.shape
+            height_offset = (height - height_valid) // 2
+            width_offset = (width - width_valid) // 2
+            sub_volume = self.volume[
+                i + middle,
                 height_offset : height_offset + height_valid,
                 width_offset : width_offset + width_valid,
             ]
 
-            # must have enough ball overlap to be bright and tile is in brain
-            sub_volume[torch.logical_and(overlaps, inside)] = (
-                self.SOMA_CENTRE_VALUE
-            )
+            # do we use tile masks?
+            if self.inside_brain_tiles is not None:
+                # unfold tiles to cover the full voxel area each tile covers
+                inside = (
+                    self.inside_brain_tiles[i + middle, :, :]
+                    .repeat_interleave(self.tile_step_height, dim=0)
+                    .repeat_interleave(self.tile_step_width, dim=1)
+                )
+                # again only process pixels in the valid area
+                inside = inside[
+                    height_offset : height_offset + height_valid,
+                    width_offset : width_offset + width_valid,
+                ]
 
-        else:
-            # must have enough ball overlap to be bright
-            sub_volume[overlaps] = self.SOMA_CENTRE_VALUE
+                # must have enough ball overlap to be bright/tile is in brain
+                sub_volume[torch.logical_and(overlaps, inside)] = (
+                    self.SOMA_CENTRE_VALUE
+                )
+
+            else:
+                # must have enough ball overlap to be bright
+                sub_volume[overlaps] = self.SOMA_CENTRE_VALUE
