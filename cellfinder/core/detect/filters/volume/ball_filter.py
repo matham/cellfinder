@@ -108,7 +108,7 @@ class BallFilter:
         "cpu", "cuda" etc. Defaults to "cpu". Any data passed to the filter
         must be on this device. Returned data will also be on this device.
     use_mask : bool
-        Whether tiling masks will be used in `append`. If False, tile maskes
+        Whether tiling masks will be used in `append`. If False, tile masks
         won't be passed in and/or will be ignored. Defaults to True.
     """
 
@@ -191,7 +191,7 @@ class BallFilter:
         # first axis is z
         tile_height = int(np.ceil(plane_height / self.tile_step_height))
         tile_width = int(np.ceil(plane_width / self.tile_step_width))
-        # Stores tile masks. Wtart with no data
+        # Stores tile masks. We start with no data
         self.inside_brain_tiles = torch.empty(
             (
                 0,
@@ -327,7 +327,7 @@ class BallFilter:
             .unsqueeze(0)
             .type(self.kernel.dtype)
         )
-        # spherical kernel is symetric so convolution=corrolation. Use
+        # spherical kernel is symmetric so convolution=correlation. Use
         # threshold mask over the kernel to sum kernel voxels that are bright
         overlap = F.conv3d(volume_tresh, self.kernel, stride=1)[0, 0, :, :, :]
         overlaps = overlap > self.overlap_threshold
@@ -364,5 +364,5 @@ class BallFilter:
             )
 
         else:
-            # must have enought ball overlap to be bright
+            # must have enough ball overlap to be bright
             sub_volume[overlaps] = self.SOMA_CENTRE_VALUE

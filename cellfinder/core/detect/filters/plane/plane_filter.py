@@ -3,7 +3,7 @@ from typing import Tuple
 
 import torch
 
-from cellfinder.core.detect.filters.plane.classical_filter import PeakEnchancer
+from cellfinder.core.detect.filters.plane.classical_filter import PeakEnhancer
 from cellfinder.core.detect.filters.plane.tile_walker import TileWalker
 
 
@@ -20,7 +20,7 @@ class TileProcessor:
     2. Tiled and compared to the corner tile. Any tile that is "bright"
        according to `TileWalker` is marked as being in the brain.
     3. Filtered
-       1. Run through the peak enhancement filter (see `PeakEnchancer`)
+       1. Run through the peak enhancement filter (see `PeakEnhancer`)
        2. Thresholded. Any values that are larger than
           (mean + stddev * n_sds_above_mean_thresh) are set to
           threshold_value.
@@ -65,7 +65,7 @@ class TileProcessor:
     n_sds_above_mean_thresh: float
 
     # filter that finds the peaks in the planes
-    peak_enhancer: PeakEnchancer = field(init=False)
+    peak_enhancer: PeakEnhancer = field(init=False)
     # generates tiles of the planes, with each tile marked as being inside
     # or outside the brain based on brightness
     tile_walker: TileWalker = field(init=False)
@@ -87,7 +87,7 @@ class TileProcessor:
         self.n_sds_above_mean_thresh = n_sds_above_mean_thresh
 
         laplace_gaussian_sigma = log_sigma_size * soma_diameter
-        self.peak_enhancer = PeakEnchancer(
+        self.peak_enhancer = PeakEnhancer(
             torch_device=torch_device,
             dtype=getattr(torch, dtype),
             clipping_value=self.clipping_value,

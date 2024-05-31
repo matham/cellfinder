@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from kornia.filters.kernels import (
     get_binary_kernel2d,
     get_gaussian_kernel1d,
@@ -91,7 +92,7 @@ def filter_for_peaks(
     return filtered_planes[:, 0, :, :]
 
 
-class PeakEnchancer:
+class PeakEnhancer:
     """
     A class that filters each plane in a z-stack such that peaks are
     visualized.
@@ -143,6 +144,28 @@ class PeakEnchancer:
     # when running on CPU whether to use pytorch or scipy for filters
     use_scipy: bool
 
+    median_filter_size: int = 3
+    """
+    The median filter size in x/y direction.
+
+    **Must** be odd.
+    """
+
+    laplace_filter_size: int = 3
+    """
+    The laplacian filter size in x/y direction.
+
+    **Must** be odd.
+    """
+
+    _padding: int
+    """
+    The padding to apply to the input data so the output will be the same as
+    the input after filtering.
+
+    During filtering we then just use the "valid" area of the filtered data.
+    """
+
     def __init__(
         self,
         torch_device: str,
@@ -157,11 +180,35 @@ class PeakEnchancer:
         self.laplace_gaussian_sigma = laplace_gaussian_sigma
         self.use_scipy = use_scipy
 
+        if not (self.median_filter_size % 2):
+            raise ValueError("The median filter size must be odd")
+        if not (self.laplace_filter_size % 2):
+            raise ValueError("The laplacian filter size must be odd")
+        assert self.gaussian_filter_size % 2, "Should be odd"
+
+        self._padding = (
+            self.median_filter_size
+            - 1
+            + self.gaussian_filter_size
+            - 1
+            + self.laplace_filter_size
+            - 1
+        ) // 2
+
         self.med_filter = self._get_median_filter(torch_device, dtype)
         self.gauss_filter = self._get_gaussian_filter(
             torch_device, dtype, laplace_gaussian_sigma
         )
         self.lap_filter = self._get_laplacian_filter(torch_device, dtype)
+
+    @property
+    def gaussian_filter_size(self) -> int:
+        """
+        The gaussian filter 1d size.
+
+        It is odd.
+        """
+        return 2 * int(round(4 * self.laplace_gaussian_sigma)) + 1
 
     def _get_median_filter(
         self, torch_device: str, dtype: torch.dtype
@@ -171,7 +218,7 @@ class PeakEnchancer:
         device.
         """
         # must be odd kernel
-        kernel_n = 3
+        kernel_n = self.median_filter_size
         weight = get_binary_kernel2d(
             kernel_n, device=torch_device, dtype=dtype
         )
@@ -183,8 +230,7 @@ class PeakEnchancer:
             1,
             kernel_n * kernel_n,
             (kernel_n, kernel_n),
-            padding="same",
-            padding_mode="reflect",
+            padding="valid",
             bias=False,
             device=torch_device,
             dtype=dtype,
@@ -199,7 +245,7 @@ class PeakEnchancer:
         dtype: torch.dtype,
         laplace_gaussian_sigma: float,
     ) -> nn.Module:
-        kernel_size = 2 * int(round(4 * laplace_gaussian_sigma)) + 1
+        kernel_size = self.gaussian_filter_size
         # shape of kernel is 11K1 with dims Z, C, Y, X. C=1, Z is expanded to
         # number of z.
         gauss_kernel = get_gaussian_kernel1d(
@@ -225,8 +271,7 @@ class PeakEnchancer:
             1,
             1,
             kernel_shape,
-            padding="same",
-            padding_mode="reflect",
+            padding="valid",
             bias=False,
             device=torch_device,
             dtype=dtype,
@@ -240,7 +285,7 @@ class PeakEnchancer:
     ) -> nn.Module:
         # must be odd kernel
         lap_kernel = get_laplacian_kernel2d(
-            3, device=torch_device, dtype=dtype
+            self.laplace_filter_size, device=torch_device, dtype=dtype
         )
         # it is 2d so turn kernel in 4d, like other filters (ZCYX)
         lap_kernel = normalize_kernel2d(lap_kernel).unsqueeze(0).unsqueeze(0)
@@ -248,9 +293,8 @@ class PeakEnchancer:
         module = nn.Conv2d(
             1,
             1,
-            (3, 3),
-            padding="same",
-            padding_mode="reflect",
+            (self.laplace_filter_size, self.laplace_filter_size),
+            padding="valid",
             bias=False,
             device=torch_device,
             dtype=dtype,
@@ -273,8 +317,17 @@ class PeakEnchancer:
                 img = laplace(img)
                 filtered_planes[i, :, :] = torch.from_numpy(img)
         else:
+            # pad enough for all the filters
+            padding = self._padding
+            mode = "reflect"
+            # if the input is too small for reflection padding, use replication
+            if planes.shape[-2] < padding or planes.shape[-1] < padding:
+                mode = "replicate"
+            # left, right, top, bottom padding
+            filtered_planes = F.pad(planes, (padding,) * 4, mode)
+
             filtered_planes = filter_for_peaks(
-                planes,
+                filtered_planes,
                 self.med_filter,
                 self.gauss_filter,
                 self.lap_filter,

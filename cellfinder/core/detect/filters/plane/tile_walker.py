@@ -120,10 +120,15 @@ def _get_bright_tiles(
         dtype=torch.bool,
         device=planes.device,
     )
+    # if we don't have enough size for a single tile, it's all outside
+    if planes.shape[1] < tile_height or planes.shape[2] < tile_width:
+        return bright_tiles_mask
+
+    # for each plane, the threshold
     out_of_brain_thresholds = _get_out_of_brain_threshold(
         planes, tile_height, tile_width
     )
-    # Z -> ZYX shape
+    # thresholds Z -> ZYX shape
     thresholds = out_of_brain_thresholds.view(-1, 1, 1)
 
     # ZYX -> ZCYX required for function (C=1)
