@@ -252,7 +252,8 @@ class CellDetector:
             # array and then fill in the point
             item = np.empty((len(points), 3), dtype=vol_np_type)
             # need to cast to int64, otherwise when dict is used we can get
-            # warnings as in numba issue #8829 b/c it assumes it's uint64
+            # warnings as in numba issue #8829 b/c it assumes it's uint64.
+            # Python uses int(64) as the type
             d[types.int64(sid)] = item
 
             for i, point in enumerate(points):
@@ -261,25 +262,31 @@ class CellDetector:
         return d
 
     def add_point(
-        self, sid: sid_numba_type, point: Union[tuple, list, np.ndarray]
+        self, sid: int, point: Union[tuple, list, np.ndarray]
     ) -> None:
         """
         Add single 3d (x, y, z) *point* to the structure with the given *sid*.
         """
-        if sid not in self.coords_maps:
-            self.coords_maps[sid] = typed.List.empty_list(tuple_point_type)
+        # cast in case user passes in int64 (default type for int in python)
+        # and numba complains
+        key = sid_numba_type(sid)
+        if key not in self.coords_maps:
+            self.coords_maps[key] = typed.List.empty_list(tuple_point_type)
 
-        self._add_point(sid, (int(point[0]), int(point[1]), int(point[2])))
+        self._add_point(key, (int(point[0]), int(point[1]), int(point[2])))
 
     def add_points(self, sid: int, points: np.ndarray):
         """
         Adds ndarray of *points* to the structure with the given *sid*.
         Each row is a 3-column (x, y, z) point.
         """
-        if sid not in self.coords_maps:
-            self.coords_maps[sid] = typed.List.empty_list(tuple_point_type)
+        # cast in case user passes in int64 (default type for int in python)
+        # and numba complains
+        key = sid_numba_type(sid)
+        if key not in self.coords_maps:
+            self.coords_maps[key] = typed.List.empty_list(tuple_point_type)
 
-        append = self.coords_maps[sid].append
+        append = self.coords_maps[key].append
         pts = np.round(points).astype(vol_np_type)
         for point in pts:
             append((point[0], point[1], point[2]))
