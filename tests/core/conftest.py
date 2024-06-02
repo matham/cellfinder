@@ -28,13 +28,21 @@ def set_device_arm_macos_ci():
         force_cpu()
 
 
-def pytest_collection_modifyitems(session, config, items: list):
+def pytest_collection_modifyitems(session, config, items: List[pytest.Item]):
     # this hook is called by pytest after test collection. Move the
     # test_detection test to the end because if it's run in the middle we run
     # into numba issue #9576 and the tests fail
-    items1 = [t for t in items if not t.name.startswith("test_detection[")]
-    items2 = [t for t in items if t.name.startswith("test_detection[")]
-    items[:] = items1 + items2
+    # end_files are moved to the end, in the given order
+    end_files = [
+        "test_connected_components_labelling.py",
+        "test_structure_detection.py",
+    ]
+
+    items_new = [t for t in items if t.path.name not in end_files]
+    for name in end_files:
+        items_new.extend([t for t in items if t.path.name == name])
+
+    items[:] = items_new
 
 
 def mark_sphere(

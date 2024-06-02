@@ -94,8 +94,11 @@ def _get_out_of_brain_threshold(
     # convert from ZYX -> ZK, where K is the elements in the corner tile
     corner_tiles = corner_tiles.reshape((planes.shape[0], -1))
 
-    corner_intensity = torch.mean(corner_tiles, dim=1)
-    corner_sd = torch.std(corner_tiles, dim=1)
+    # need to operate in float64, in case the values are large
+    corner64 = corner_tiles.type(torch.float64)
+    corner_intensity = torch.mean(corner64, dim=1).type(planes.dtype)
+    # for parity with past when we used np.std, which defaults to ddof=0
+    corner_sd = torch.std(corner64, dim=1, correction=0).type(planes.dtype)
     # add 1 to ensure not 0, as disables
     out_of_brain_thresholds = corner_intensity + 2 * corner_sd + 1
 

@@ -80,8 +80,8 @@ def test_2d_filtering(filtered_data_array, torch_device, use_scipy):
     n_pixels = data.shape[1] * data.shape[2]
     # fraction pixels that are different
     frac = diff / n_pixels
-    # 99.99% same
-    assert np.all(np.less(frac, 1 - 0.9999))
+    # 99.999% same
+    assert np.all(np.less(frac, 1 - 0.99_999))
 
     assert tiles_our.shape == tiles.shape
     assert tiles_our.dtype == tiles.dtype
@@ -124,7 +124,7 @@ def test_even_filter_kernel():
             n = PeakEnhancer.median_filter_size
             PeakEnhancer.median_filter_size = 4
             PeakEnhancer(
-                "cuda",
+                "cpu",
                 torch.float32,
                 clipping_value=5,
                 laplace_gaussian_sigma=3.0,
@@ -133,28 +133,20 @@ def test_even_filter_kernel():
         finally:
             PeakEnhancer.median_filter_size = n
 
-    with pytest.raises(ValueError):
-        try:
-            n = PeakEnhancer.laplace_filter_size
-            PeakEnhancer.laplace_filter_size = 4
-            PeakEnhancer(
-                "cuda",
-                torch.float32,
-                clipping_value=5,
-                laplace_gaussian_sigma=3.0,
-                use_scipy=False,
-            )
-        finally:
-            PeakEnhancer.laplace_filter_size = n
-
     enhancer = PeakEnhancer(
-        "cuda",
+        "cpu",
         torch.float32,
         clipping_value=5,
         laplace_gaussian_sigma=3.0,
         use_scipy=False,
     )
+
     assert enhancer.gaussian_filter_size % 2
+
+    _, _, x, y = enhancer.lap_kernel.shape
+    assert x % 2, "Should be odd"
+    assert y % 2, "Should be odd"
+    assert x == y
 
 
 @pytest.mark.parametrize(

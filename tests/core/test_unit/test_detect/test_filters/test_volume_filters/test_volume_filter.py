@@ -47,7 +47,10 @@ def run_main_assert_exception():
     try:
         # must be on cpu b/c only on cpu do we do 2d filtering in subprocess
         # lots of planes so it doesn't end naturally quickly
-        main(signal_array=np.zeros((500, 500, 500)), torch_device="cpu")
+        main(
+            signal_array=np.zeros((500, 500, 500), dtype=np.uint16),
+            torch_device="cpu",
+        )
         assert False, "should have raised exception"
     except ExecutionFailure as e:
         e2 = e.__cause__
