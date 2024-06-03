@@ -214,6 +214,20 @@ class BallFilter:
         return int(math.floor(self.ball_z_size / 2))
 
     @property
+    def remaining_planes(self) -> int:
+        """
+        The number of planes in `self.volume` (or the planes passed in) that
+        will remain unprocessed after all the planes have been `walk`ed
+        and `get_processed_planes` called.
+
+        E.g. if `ball_z_size` is 3, then this may return 1. Meaning the last
+        plane passed to `append`, will never be returned by
+        `get_processed_planes` because the filter "center" never overlapped
+        with it.
+        """
+        return self.ball_z_size - self.first_valid_plane - 1
+
+    @property
     def ready(self) -> bool:
         """
         Return whether enough planes have been appended to run the filter

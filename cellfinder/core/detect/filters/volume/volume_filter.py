@@ -380,6 +380,11 @@ class VolumeFilter:
         detection_converter = self.settings.detection_data_converter_func
         save_planes = self.settings.save_planes
         previous_plane = None
+        bf = self.ball_filter
+
+        # these many planes are not processed at start because 3d filter uses
+        # it as padding at the start of filter
+        progress_bar.update(bf.first_valid_plane)
 
         # main thread needs a token to send us planes - populate with some
         for _ in range(self.n_queue_buffer):
@@ -389,8 +394,12 @@ class VolumeFilter:
             # thread/underlying queues get first crack at msg. Unless we get
             # eof, this will block until we get more data
             msg = thread.get_msg_from_mainthread()
-            # requested that we return
+            # requested that we return. This can mean the main thread finished
+            # sending data and it appended eof - so we get eof after all planes
             if msg is EOFSignal:
+                # these many planes are not processed at the end because 3d
+                # filter uses it as padding at the end of the filter
+                progress_bar.update(bf.remaining_planes)
                 return
 
             # convert plane to the type needed by detection system
