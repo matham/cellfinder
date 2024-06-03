@@ -157,4 +157,11 @@ def _threshold_planes(
     sd = torch.std(planes_1d, dim=1, keepdim=True).unsqueeze(2)
     threshold = avg + n_sds_above_mean_thresh * sd
 
-    planes[enhanced_planes > threshold] = threshold_value
+    above = enhanced_planes > threshold
+    planes[above] = threshold_value
+    # subsequent steps only care about the values that are set to threshold or
+    # above in planes. We set values in *planes* to threshold based on the
+    # value in *enhanced_planes*. So, there could be values in planes that are
+    # at threshold already, but in enhanced_planes they are not. So it's best
+    # to zero all other values, so voxels previously at threshold don't count
+    planes[torch.logical_not(above)] = 0
