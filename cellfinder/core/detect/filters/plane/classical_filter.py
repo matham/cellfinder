@@ -45,6 +45,7 @@ def filter_for_peaks(
     gauss_kernel_size: int,
     lap_kernel: torch.Tensor,
     device: str,
+    clipping_value: float,
 ) -> torch.Tensor:
     """
     Takes the 3d z-stack and returns a new z-stack where the peaks are
@@ -130,7 +131,11 @@ def filter_for_peaks(
     filtered_planes = F.conv2d(filtered_planes, lap_kernel, padding="valid")
 
     # we don't need the channel axis
-    return filtered_planes[:, 0, :, :]
+    filtered_planes = filtered_planes[:, 0, :, :]
+
+    # scale back to full scale
+    normalize(filtered_planes, clipping_value, flip=True, upscale=True)
+    return filtered_planes
 
 
 class PeakEnhancer:
@@ -321,17 +326,19 @@ class PeakEnhancer:
                 img = gaussian_filter(img, self.laplace_gaussian_sigma)
                 img = laplace(img)
                 filtered_planes[i, :, :] = torch.from_numpy(img)
-        else:
-            filtered_planes = filter_for_peaks(
-                planes,
-                self.med_kernel,
-                self.gauss_kernel,
-                self.gaussian_filter_size,
-                self.lap_kernel,
-                self.torch_device,
-            )
 
-        normalize(
-            filtered_planes, self.clipping_value, flip=True, upscale=True
+            normalize(
+                filtered_planes, self.clipping_value, flip=True, upscale=True
+            )
+            return filtered_planes
+
+        filtered_planes = filter_for_peaks(
+            planes,
+            self.med_kernel,
+            self.gauss_kernel,
+            self.gaussian_filter_size,
+            self.lap_kernel,
+            self.torch_device,
+            self.clipping_value,
         )
         return filtered_planes

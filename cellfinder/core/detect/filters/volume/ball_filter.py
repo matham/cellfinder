@@ -329,64 +329,87 @@ class BallFilter:
         if not self.ready:
             raise TypeError("Called walk before enough planes were appended")
 
-        num_process = self.volume.shape[0] - self.kernel_z_size + 1
-        height, width = self.volume.shape[1:]
-        middle = self.middle_z_idx
-        kernel = self.kernel
-        num_z = kernel.shape[2]
-
-        # threshold volume so it's zero/one. And add two dims at start so
-        # it's 11ZYX
-        volume_tresh = (
-            (self.volume >= self.THRESHOLD_VALUE)
-            .unsqueeze(0)
-            .unsqueeze(0)
-            .type(kernel.dtype)
+        _walk(
+            self.kernel_z_size,
+            self.middle_z_idx,
+            self.tile_step_height,
+            self.tile_step_width,
+            self.overlap_threshold,
+            self.THRESHOLD_VALUE,
+            self.SOMA_CENTRE_VALUE,
+            self.kernel,
+            self.volume,
+            self.inside_brain_tiles,
         )
 
-        # we do a plane at a time, volume: i:i+num_z, for plane i+middle
-        for i in range(num_process):
-            # spherical kernel is symmetric so convolution=correlation. Use
-            # binary threshold mask over the kernel to sum the value of the
-            # kernel at voxels that are bright
-            overlap = F.conv3d(
-                volume_tresh[:, :, i : i + num_z, :, :],
-                kernel,
-                stride=1,
-                padding="valid",
-            )[0, 0, 0, :, :]
-            overlaps = overlap > self.overlap_threshold
 
-            # only edit the volume that is valid - conv excludes edges so we
-            # only edit the plane parts returned by conv3d
-            height_valid, width_valid = overlaps.shape
-            height_offset = (height - height_valid) // 2
-            width_offset = (width - width_valid) // 2
-            sub_volume = self.volume[
-                i + middle,
+@torch.jit.script
+def _walk(
+    kernel_z_size: int,
+    middle: int,
+    tile_step_height: int,
+    tile_step_width: int,
+    overlap_threshold: float,
+    threshold_value: int,
+    soma_centre_value: int,
+    kernel: torch.Tensor,
+    volume: torch.Tensor,
+    inside_brain_tiles: Optional[torch.Tensor],
+):
+    num_process = volume.shape[0] - kernel_z_size + 1
+    height, width = volume.shape[1:]
+    num_z = kernel.shape[2]
+
+    # threshold volume so it's zero/one. And add two dims at start so
+    # it's 11ZYX
+    volume_tresh = (
+        (volume >= threshold_value)
+        .unsqueeze(0)
+        .unsqueeze(0)
+        .type(kernel.dtype)
+    )
+
+    # we do a plane at a time, volume: i:i+num_z, for plane i+middle
+    for i in range(num_process):
+        # spherical kernel is symmetric so convolution=correlation. Use
+        # binary threshold mask over the kernel to sum the value of the
+        # kernel at voxels that are bright
+        overlap = F.conv3d(
+            volume_tresh[:, :, i : i + num_z, :, :],
+            kernel,
+            stride=1,
+            padding="valid",
+        )[0, 0, 0, :, :]
+        overlaps = overlap > overlap_threshold
+
+        # only edit the volume that is valid - conv excludes edges so we
+        # only edit the plane parts returned by conv3d
+        height_valid, width_valid = overlaps.shape
+        height_offset = (height - height_valid) // 2
+        width_offset = (width - width_valid) // 2
+        sub_volume = volume[
+            i + middle,
+            height_offset : height_offset + height_valid,
+            width_offset : width_offset + width_valid,
+        ]
+
+        # do we use tile masks?
+        if inside_brain_tiles is not None:
+            # unfold tiles to cover the full voxel area each tile covers
+            inside = (
+                inside_brain_tiles[i + middle, :, :]
+                .repeat_interleave(tile_step_height, dim=0)
+                .repeat_interleave(tile_step_width, dim=1)
+            )
+            # again only process pixels in the valid area
+            inside = inside[
                 height_offset : height_offset + height_valid,
                 width_offset : width_offset + width_valid,
             ]
 
-            # do we use tile masks?
-            if self.inside_brain_tiles is not None:
-                # unfold tiles to cover the full voxel area each tile covers
-                inside = (
-                    self.inside_brain_tiles[i + middle, :, :]
-                    .repeat_interleave(self.tile_step_height, dim=0)
-                    .repeat_interleave(self.tile_step_width, dim=1)
-                )
-                # again only process pixels in the valid area
-                inside = inside[
-                    height_offset : height_offset + height_valid,
-                    width_offset : width_offset + width_valid,
-                ]
+            # must have enough ball overlap to be bright/tile is in brain
+            sub_volume[torch.logical_and(overlaps, inside)] = soma_centre_value
 
-                # must have enough ball overlap to be bright/tile is in brain
-                sub_volume[torch.logical_and(overlaps, inside)] = (
-                    self.SOMA_CENTRE_VALUE
-                )
-
-            else:
-                # must have enough ball overlap to be bright
-                sub_volume[overlaps] = self.SOMA_CENTRE_VALUE
+        else:
+            # must have enough ball overlap to be bright
+            sub_volume[overlaps] = soma_centre_value
