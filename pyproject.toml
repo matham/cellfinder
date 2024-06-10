@@ -44,6 +44,7 @@ cellfinder = "cellfinder.napari:napari.yaml"
 dev = [
     "black",
     "pre-commit",
+    "pooch >=1",
     "pyinstrument",
     "pytest-cov",
     "pytest-mock",
