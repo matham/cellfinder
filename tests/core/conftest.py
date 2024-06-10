@@ -1,7 +1,9 @@
 import os
+from pathlib import Path
 from typing import Tuple
 
 import numpy as np
+import pooch
 import pytest
 import torch.backends.mps
 from skimage.filters import gaussian
@@ -85,3 +87,63 @@ def synthetic_bright_spots() -> Tuple[np.ndarray, np.ndarray]:
     background_array = np.zeros_like(signal_array)
 
     return signal_array, background_array
+
+
+@pytest.fixture
+def test_data_registry():
+    """
+    Create a test data registry for BrainGlobe.
+
+    Returns:
+        pooch.Pooch: The test data registry object.
+
+    """
+    registry = pooch.create(
+        pooch.os_cache("brainglobe_test_data"),
+        base_url="https://gin.g-node.org/BrainGlobe/test-data/raw/master/",
+        env="BRAINGLOBE_TEST_DATA_DIR",
+    )
+    registry.load_registry(Path(__file__).parent / "registry.txt")
+    return registry
+
+
+@pytest.fixture
+def fetch_pooch_directory():
+    """
+    Fetches files from the Pooch registry that belong to a specific directory.
+
+    Parameters:
+        registry (pooch.Pooch): The Pooch registry object.
+        directory_name (str):
+            The remote relative path of the directory to fetch files from.
+        processor (callable, optional):
+            A function to process the fetched files. Defaults to None.
+        downloader (callable, optional):
+            A function to download the files. Defaults to None.
+        progressbar (bool, optional):
+            Whether to display a progress bar during the fetch.
+            Defaults to False.
+
+    Returns:
+        str: The local absolute path to the fetched directory.
+    """
+
+    def _fetch_pooch_registry(
+        registry: pooch.Pooch,
+        directory_name: str,
+        processor=None,
+        downloader=None,
+        progressbar=False,
+    ):
+        for name in registry.registry_files:
+            if name.startswith(f"{directory_name}/"):
+                registry.fetch(
+                    name,
+                    processor=processor,
+                    downloader=downloader,
+                    progressbar=progressbar,
+                )
+
+        return str(registry.abspath / directory_name)
+
+    return _fetch_pooch_registry
