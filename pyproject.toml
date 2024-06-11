@@ -51,6 +51,7 @@ dev = [
     "pytest-timeout",
     "pytest",
     "tox",
+    "pooch >= 1",
 ]
 napari = [
     "brainglobe-napari-io",
@@ -136,4 +137,5 @@ passenv =
     XAUTHORITY
     NUMPY_EXPERIMENTAL_ARRAY_FUNCTION
     PYVISTA_OFF_SCREEN
+    BRAINGLOBE_TEST_DATA_DIR
 """

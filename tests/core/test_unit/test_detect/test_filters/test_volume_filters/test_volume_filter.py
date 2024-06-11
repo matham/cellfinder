@@ -2,10 +2,16 @@ import numpy as np
 import pytest
 import torch
 from brainglobe_utils.IO.cells import get_cells_xml
+from brainglobe_utils.IO.image.load import read_with_dask
 from pytest_mock.plugin import MockerFixture
 
+try:
+    from brainglobe_utils.cells.cells import match_cells
+except ImportError:
+    match_cells = None
+
 from cellfinder.core.detect.detect import main
-from cellfinder.core.tools.IO import read_with_dask
+from cellfinder.core.tools.IO import fetch_pooch_directory
 from cellfinder.core.tools.threading import ExecutionFailure
 from cellfinder.core.tools.tools import get_max_possible_int_value
 
@@ -18,23 +24,9 @@ class ExceptionTest(Exception):
     pass
 
 
-@pytest.fixture
-def filtered_data_array(repo_data_path):
-    # loads an input and already 3d filtered data set
-    data_path = (
-        repo_data_path
-        / "integration"
-        / "detection"
-        / "structure_split_test"
-        / "signal"
-    )
-    filtered_path = (
-        repo_data_path / "integration" / "detection" / "filter" / "3d_filter"
-    )
-    return (
-        read_with_dask(str(data_path)),
-        read_with_dask(str(filtered_path)),
-    )
+def load_pooch_dir(test_data_registry, path):
+    data_path = fetch_pooch_directory(test_data_registry, path)
+    return read_with_dask(data_path)
 
 
 def raise_exception(*args, **kwargs):
@@ -196,34 +188,60 @@ def test_saving_filtered_planes_no_dir():
 
 
 @pytest.mark.parametrize(
+    "signal,filtered,cells,soma_diameter,voxel_sizes,cell_tol",
+    [
+        (
+            "edge_cells_brain/signal",
+            "edge_cells_brain/3d_filter",
+            "edge_cells_brain/detected_cells.xml",
+            16,
+            (5, 2, 2),
+            0,
+        ),
+        (
+            "bright_brain/signal",
+            "bright_brain/3d_filter",
+            "bright_brain/detected_cells.xml",
+            30,
+            (5.06, 4.5, 4.5),
+            1,
+        ),
+    ],
+)
+@pytest.mark.parametrize(
     "torch_device,use_scipy", [("cpu", False), ("cpu", True), ("cuda", False)]
 )
-def test_3d_filtering_saved(
-    filtered_data_array,
+def test_3d_filtering(
+    signal,
+    filtered,
+    cells,
+    soma_diameter,
+    voxel_sizes,
+    cell_tol,
     torch_device,
     use_scipy,
     no_free_cpus,
     tmp_path,
-    repo_data_path,
+    test_data_registry,
 ):
     # test that the full 2d/3d matches the saved data
     if torch_device == "cuda" and not torch.cuda.is_available():
         pytest.skip("Cuda is not available")
 
     # check input data size/type is as expected
-    data, filtered = filtered_data_array
-    data = np.asarray(data)
-    filtered = np.asarray(filtered)
+    data = np.asarray(load_pooch_dir(test_data_registry, signal))
+    filtered = np.asarray(load_pooch_dir(test_data_registry, filtered))
+    cells = get_cells_xml(test_data_registry.fetch(cells))
     assert data.dtype == np.uint16
     assert filtered.dtype == np.uint32
     assert data.shape == (filtered.shape[0] + 2, *filtered.shape[1:])
 
     path = tmp_path / "3d_filter"
     path.mkdir()
-    cells = main(
+    cells_our = main(
         signal_array=data,
-        voxel_sizes=(5, 2, 2),
-        soma_diameter=16,
+        voxel_sizes=voxel_sizes,
+        soma_diameter=soma_diameter,
         max_cluster_size=100000,
         ball_xy_size=6,
         ball_z_size=15,
@@ -253,24 +271,14 @@ def test_3d_filtering_saved(
     filtered_our[filtered_our != max16] = 0
     filtered[filtered_our != max32] = 0
 
-    # the number of pixels per plane that are different
+    # the number of pixels per plane that are different (marked bright/not)
     diff = np.sum(np.sum(filtered_our != filtered, axis=2), axis=1)
-    # total pixels per plane
-    n_pixels = data.shape[1] * data.shape[2]
-    # fraction pixels that are different
-    frac = diff / n_pixels
     # 100% same
-    assert np.all(np.isclose(frac, 0))
+    assert np.all(diff == 0)
 
-    # check that the resulting cells are the same
-    cells_path = (
-        repo_data_path
-        / "integration"
-        / "detection"
-        / "filter"
-        / "detected_cells.xml"
-    )
-    original_cells = get_cells_xml(str(cells_path), cells_only=False)
-
-    assert len(original_cells) == len(cells)
-    assert set(original_cells) == set(cells)
+    # check that the resulting cells are the same. We expect them to be the
+    # same, cells at different pos count as different
+    cells_our = set(cells_our)
+    cells = set(cells)
+    diff = len(cells_our - cells) + len(cells - cells_our)
+    assert diff <= cell_tol

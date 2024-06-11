@@ -393,7 +393,7 @@ def _walk(
             width_offset : width_offset + width_valid,
         ]
 
-        # do we use tile masks?
+        # do we use tile masks or just overlapping?
         if inside_brain_tiles is not None:
             # unfold tiles to cover the full voxel area each tile covers
             inside = (

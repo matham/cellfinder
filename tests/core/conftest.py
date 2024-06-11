@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 import numpy as np
+import pooch
 import pytest
 import torch.backends.mps
 from skimage.filters import gaussian
@@ -43,6 +44,27 @@ def pytest_collection_modifyitems(session, config, items: List[pytest.Item]):
         items_new.extend([t for t in items if t.path.name == name])
 
     items[:] = items_new
+
+
+@pytest.fixture
+def test_data_registry():
+    """
+    Create a test data registry for BrainGlobe.
+
+    Returns:
+        pooch.Pooch: The test data registry object.
+
+    """
+    registry = pooch.create(
+        path=pooch.os_cache("brainglobe_test_data"),
+        base_url="https://gin.g-node.org/BrainGlobe/test-data/raw/master/cellfinder/",
+        env="BRAINGLOBE_TEST_DATA_DIR",
+    )
+
+    registry.load_registry(
+        Path(__file__).parent.parent / "data" / "pooch_registry.txt"
+    )
+    return registry
 
 
 def mark_sphere(
@@ -186,4 +208,4 @@ def repo_data_path() -> Path:
     The root path where the data used during test is stored
     """
     # todo: use mod relative paths to find data instead of depending on cwd
-    return Path.cwd() / "tests" / "data"
+    return Path(__file__).parent.parent / "data"
