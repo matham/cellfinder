@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from brainglobe_utils.IO.image.load import read_with_dask
 
+from cellfinder.core.detect.filters.setup_filters import DetectionSettings
 from cellfinder.core.detect.filters.volume.structure_splitting import (
     split_cells,
 )
@@ -81,7 +82,16 @@ def test_underflow_issue_435():
     bright_voxels[np.logical_or(inside1, inside2)] = True
     bright_indices = np.argwhere(bright_voxels)
 
-    centers = split_cells(bright_indices)
+    settings = DetectionSettings(
+        plane_shape=(100, 100),
+        plane_original_np_dtype=np.float32,
+        voxel_sizes=(1, 1, 1),
+        ball_xy_size_um=3,
+        ball_z_size_um=3,
+        ball_overlap_fraction=0.8,
+        soma_diameter_um=7,
+    )
+    centers = split_cells(bright_indices, settings)
 
     # for some reason, same with pytorch, it's shifted by 1. Probably rounding
     expected = {(10, 11, 11), (20, 11, 11)}
