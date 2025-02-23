@@ -35,7 +35,7 @@ def get_model(
     """
     if existing_model is not None or network_depth is None:
         logger.debug(f"Loading model: {existing_model}")
-        return keras.models.load_model(existing_model)
+        model = keras.models.load_model(existing_model)
     else:
         logger.debug(f"Creating a new instance of model: {network_depth}")
         model = build_model(
@@ -58,6 +58,9 @@ def get_model(
                     f"Error loading weights: {model_weights}.\n"
                     "Provided weights don't match the model architecture.\n"
                 ) from e
+
+    if inference:
+        model.trainable = False
 
     return model
 
