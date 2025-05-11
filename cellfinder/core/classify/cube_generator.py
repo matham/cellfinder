@@ -23,7 +23,7 @@ from cellfinder.core.tools.threading import (
 from cellfinder.core.tools.tools import get_axis_reordering, get_data_converter
 
 AXIS = Literal["x", "y", "z"]
-DIM = Literal["x", "y", "z", "c"]
+DIM = Literal[AXIS, "c"]
 RandRange = Sequence[float] | Sequence[tuple[float, float]] | None
 
 
@@ -36,6 +36,27 @@ def _read_data_send_cuboids(
     dataset: "ImageDataBase",
     queues: list[Queue],
 ) -> None:
+    """
+    Function run by sub-thread that reads data from a dataset, extracts the
+    cuboids, and sends them back to the main thread for further processing.
+
+    Each thread listens on its own main queue, via its
+    `thread.get_msg_from_mainthread`, for requests. We also pass in a list of
+    response queues to which the response of a given request is sent. Each
+    request indicates which queue in the list to send back the read data.
+
+    Requests also pass in a torch buffer into which we read the cube data,
+    saving us having to send back newly allocated buffers.
+
+    If there's an exception serving a particular request, the indicated queue
+    is sent back the exception, instead of the normal data response.
+
+    :param thread: The `ThreadWithException`, automatically passed to the func.
+    :param dataset: The `ImageDataBase` used to read the data and cubes.
+    :param queues: A list of queues for sending data. Each request to the
+        sub-thread indicates which queue in the list to send the cubes. This
+        allows one thread to serve multiple consumers.
+    """
     while True:
         msg = thread.get_msg_from_mainthread()
         if msg == EOFSignal:
@@ -61,6 +82,16 @@ def get_data_cuboid_voxels(
     network_voxel_size_um: float,
     data_voxel_size_um: float,
 ) -> int:
+    """In a given dimension, the network is trained with
+    `network_cuboid_voxels` voxels and at `network_voxel_size_um` um per voxel.
+    This returns the corresponding number of voxels of the input data with its
+    `data_voxel_size_um` um per voxel.
+
+    :param network_cuboid_voxels: The trained network's cube number of voxels
+        in that dimension.
+    :param network_voxel_size_um: The network's um per voxel in the dim.
+    :param data_voxel_size_um: The input data's um per voxel in the dim.
+    """
     return int(
         round(
             network_cuboid_voxels * network_voxel_size_um / data_voxel_size_um
@@ -71,6 +102,19 @@ def get_data_cuboid_voxels(
 def get_data_cuboid_range(
     pos: float, num_voxels: int, axis: AXIS
 ) -> tuple[int, int]:
+    """For a given dim, takes the location of a point in the input data and
+    returns the start and end index in the data that centers a cube on the
+    point.
+
+    :param pos: The position, in voxels, of the point in the input data. For
+        the given dim.
+    :param num_voxels: The number of voxels of the cube in this dim.
+    :param axis: The name of the axis we're calculating. Can be the str
+        `"x"`, `"y"`, or `"z"`. The axes are centered differently for backward
+        compatibility.
+    :return: tuple of ints, `(start, end)`. Cube can be extracted then with
+        `data[start:end]`.
+    """
     match axis:
         case "x" | "y":
             start = int(round(pos - num_voxels / 2))
@@ -84,32 +128,38 @@ def get_data_cuboid_range(
 
 class ImageDataBase:
     """
-    A base class for getting cuboids out of image data.
+    A base class for extracting cuboids out of image data.
 
-    At the base level we have a list of positions (center location of
-    potential cells) and we return a cuboid corresponding to a position
-    when given its index in the list. The returned cuboid is of size
-    `cuboid_with_channels_size` with the corresponding axis order given by
-    `data_with_channels_axis_order`. These correspond to the provided
-    `cuboid_size` and `data_axis_order`, with the addition of the channels
-    dimension.
+    At the base level we initialize with an array of 3d positions (center
+    location of potential cells) and we can return a cuboid centered on a
+    position, given its index in the list.
+
+    The returned cuboid is of size `cuboid_with_channels_size` with the
+    corresponding axis order given by `data_with_channels_axis_order`. These
+    correspond to the provided `cuboid_size` and `data_axis_order`, only with
+    the addition of the channels dimension.
     """
 
     points_arr: np.ndarray = None
+    """An Nx3 array. Each row is a 3d point with the position of a potential
+    cell. Units are voxels of the input data.
+    """
 
     num_channels: int = 1
+    """The number of channels contained in the input data."""
 
     cuboid_size: tuple[int, int, int] = (1, 1, 1)
-    # in units of voxels, not um. in data_axis_order
+    """Size of the cuboid in 3d. Cuboids of this size, centered at a given
+    point will be returned.
+
+    Units are voxels in the input data. The axis order corresponds
+    to `data_axis_order`.
+    """
 
     data_axis_order: tuple[AXIS, AXIS, AXIS] = ("z", "y", "x")
-
-    data_with_channels_axis_order: tuple[DIM, DIM, DIM, DIM] = (
-        "z",
-        "y",
-        "x",
-        "c",
-    )
+    """The axis order of the input date. It's a tuple of `"x"`, `"y"`, and
+    `"z"` matching the dim order of the input data.
+    """
 
     def __init__(
         self,
@@ -130,18 +180,50 @@ class ImageDataBase:
                 f"{data_axis_order}"
             )
         self.data_axis_order = data_axis_order
-        self.data_with_channels_axis_order = *data_axis_order, "c"
+
+    @property
+    def data_with_channels_axis_order(self) -> tuple[DIM, DIM, DIM, DIM]:
+        """Same as `data_axis_order`, but it's a 4-tuple because we also
+        include `"c"`. The output cube ordering is 4 dimensional, x, y, z,
+        and c. This specifies the order.
+
+        By default, it's just `data_axis_order` plus `c` at
+        the end. But it could be different for different loaders.
+        """
+        return *self.data_axis_order, "c"
 
     @property
     def cuboid_with_channels_size(self) -> tuple[int, int, int, int]:
+        """Similar to `cuboid_size`, but it also includes channels size."""
         return *self.cuboid_size, self.num_channels
 
     def get_point_cuboid_data(self, point_key: int) -> torch.Tensor:
+        """
+        Takes a key used to identify a specific point and returns the cuboid
+        centered around the point.
+
+        :param point_key: A unique key used to identify the point. E.g. the
+            index in `points_arr`.
+        :return: The torch Tensor of size `cuboid_with_channels_size` centered
+            on the point.
+        """
         raise NotImplementedError
 
     def get_point_batch_cuboid_data(
         self, batch: torch.Tensor, points_key: list[int]
     ) -> None:
+        """
+        Similar to `get_point_cuboid_data` except it passes a sequence of keys
+        that identifies a list of points. We then fill `batch` with the cuboids
+        centered around the points.
+
+        :param batch: A 5d torch tensor of size N x cuboid_with_channels_size
+            into which the cuboids corresponding to the points will be filled
+            into. N is the number of points (the length of `points_key`) and is
+            the first dimension.
+        :param points_key: A list of unique keys used to identify the points.
+            E.g. their indices in `points_arr`.
+        """
         raise NotImplementedError
 
 
@@ -154,14 +236,33 @@ class CachedStackImageDataBase(ImageDataBase):
 
     This is especially efficient when we request cuboids sequentially ordered
     by the first axis. E.g. if the first axis is z, then requesting cuboids
-    ordered by increasing z will be very fast.
+    ordered by increasing z will be very fast. With a buffer size at least as
+    large as the number of processing workers, even if we read z planes
+    slightly out of order e.g. if multiple workers request them in parallel
+    which are serialized slightly out of order, it should still be very fast.
     """
 
     stack_shape: tuple[int, int, int]
+    """
+    The 3d input array size. Its axis order is `data_axis_order`.
+    """
 
     max_axis_0_planes_buffered: int = 0
+    """
+    The number of planes to buffer in memory for the first axis, in addition to
+    the number of planes in a cube corresponding to this axis. This
+    corresponds to the first axis in `data_axis_order`. The assumption is that
+    data is read from disk in planes of that axis.
+
+    A good default is the max of the number of planes in a cube and the number
+    of workers used by the torch data loaders.
+    """
 
     _planes_buffer: OrderedDict[int, torch.Tensor]
+    """
+    Cache that maps plane numbers to the plane tensor. Plane axis and max dict
+    size is as in `max_axis_0_planes_buffered`.
+    """
 
     def __init__(
         self,
@@ -176,6 +277,10 @@ class CachedStackImageDataBase(ImageDataBase):
         self._planes_buffer = OrderedDict()
 
     def get_point_cuboid_data(self, point_key: int) -> torch.Tensor:
+        """
+        See base-class, except `point_key` *is* the plane index in the array of
+        planes.
+        """
         data = torch.empty(self.cuboid_with_channels_size, dtype=torch.float32)
 
         point = self.points_arr[point_key]
@@ -187,6 +292,10 @@ class CachedStackImageDataBase(ImageDataBase):
     def get_point_batch_cuboid_data(
         self, batch: torch.Tensor, points_key: list[int]
     ) -> None:
+        """
+        See base-class, except `points_key` *is* the plane index in the array
+        of planes.
+        """
         if len(points_key) != batch.shape[0]:
             raise ValueError(
                 "Expected the number of points to match the batch size"
@@ -199,6 +308,12 @@ class CachedStackImageDataBase(ImageDataBase):
                 batch[i, j, ...] = plane
 
     def _get_cuboid_planes(self, point: np.ndarray) -> list[torch.Tensor]:
+        """
+        Takes a 3d point and returns a list of sequential planes, where when
+        concatenated in the first axis yields a cube of the correct size.
+        This is more efficient, for the calling function to copy plane by plane
+        into its buffer than use concatenating and calling function copying.
+        """
         max_planes = self.max_axis_0_planes_buffered
         planes_buffer = self._planes_buffer
 
@@ -229,6 +344,15 @@ class CachedStackImageDataBase(ImageDataBase):
         return planes
 
     def read_plane(self, plane: int, channel: int) -> torch.Tensor:
+        """
+        Takes a plane number along the first axis and a channel number and
+        it returns the torch tensor containing that plane for that channel.
+
+        :param plane: The plane index in the first dim of `stack_shape` to
+            read.
+        :param channel: The channel number `<num_channels` we want to read.
+        :return: The plane data as a tensor.
+        """
         raise NotImplementedError
 
 
@@ -239,6 +363,9 @@ class CachedArrayStackImageData(CachedStackImageDataBase):
     """
 
     input_arrays: list[types.array]
+    """
+    List of the arrays. Each items corresponds to a channel.
+    """
 
     def __init__(
         self,
@@ -266,13 +393,22 @@ class CachedCuboidImageDataBase(ImageDataBase):
     """
     Takes a collection of cuboids (e.g. a folder of tiff files, each a cuboid
     or a list of 3d numpy arrays) and returns a requested cuboid as a torch
-    Tensor. It also buffers `max_cuboids_buffered` recent cuboids so they
+    Tensor.
+
+    It also buffers `max_cuboids_buffered` recent cuboids so they
     don't have to be repeatedly read.
     """
 
     max_cuboids_buffered: int = 0
+    """
+    The number of most recently read cuboids to keep in memory.
+    """
 
     _cuboids_buffer: OrderedDict[Hashable, torch.Tensor]
+    """
+    Maps the cuboids hashable point keys to the cuboids. The cuboid buffered
+    includes the channels in the `data_with_channels_axis_order` order.
+    """
 
     def __init__(
         self,
@@ -318,6 +454,14 @@ class CachedCuboidImageDataBase(ImageDataBase):
             batch[i, ...] = self.get_point_cuboid_data(point_key)
 
     def read_cuboid(self, point_key: int, channel: int) -> torch.Tensor:
+        """
+        Takes a key used to identify a point and a channel number and
+        returns the torch tensor containing the cuboid for that channel.
+
+        :param point_key: A key used to identify the point.
+        :param channel: The channel number `<num_channels` we want to read.
+        :return: The cuboid's data as a tensor.
+        """
         raise NotImplementedError
 
 
@@ -328,6 +472,10 @@ class CachedTiffCuboidImageData(CachedCuboidImageDataBase):
     """
 
     filenames_arr: np.ndarray = None
+    """
+    A 2d numpy array containing the list of tiff filenames. Each item is the
+    list of the filenames of that point's channels.
+    """
 
     def __init__(
         self,
@@ -352,6 +500,10 @@ class CachedTiffCuboidImageData(CachedCuboidImageDataBase):
         ]
 
     def read_cuboid(self, point_key: int, channel: int) -> torch.Tensor:
+        """
+        See super-class. `point_key` is the cuboid's index in `filenames_arr`
+        that we want to read.
+        """
         converter = self._converters[channel]
         data = imread(str(self.filenames_arr[point_key][channel]))
         return torch.from_numpy(converter(data))
@@ -359,20 +511,102 @@ class CachedTiffCuboidImageData(CachedCuboidImageDataBase):
 
 class CuboidDatasetBase(Dataset):
     """
-    Implements a pytorch `Dataset` that takes a list of points (potential
-    cells) and a `ImageDataBase` instance and returns torch Tensors
-    with the cuboids centered these each of these points.
+    Implements a pytorch `Dataset` that takes a list of 3d point coordinates
+    (centers of potential cells) and a `ImageDataBase` instance that contains
+    voxel data. The dataset yields batches of torch Tensors with cuboids
+    of the voxel data centered at these points.
+
+    Data is accessed similar to normal torch Dataset. With e.g. `len(dataset)`
+    or `dataset[i]`. If `i` is a single int it returns the corresponding 4d
+    item (includes channel), otherwise it's a sequence of ints and it returns
+    a 5d batch of those items. The batch dimension is always the first
+    dimension followed by `output_axis_order` dimensions.
+
+    The data output is either just the data or it also includes the labels,
+    depending on `target_output`.
+
+    :param points: A list of `Cell`instances containing the cell centers.
+    :param data_voxel_sizes: A 3-tuple indicating the input data's 3d voxel
+        size in `um`. The tuple's order corresponds to `axis_order`.
+    :param network_voxel_sizes: A 3-tuple indicating the trained network's 3d
+        voxel size in `um`. The tuple's order corresponds to `axis_order`.
+    :param network_cuboid_voxels: A 3-tuple indicating the cuboid size used to
+        train the network in voxels The tuple's order corresponds to
+        `axis_order`.
+    :param axis_order: A 3-tuple indicating the input data's three
+        dimensions' axis order. It's any permutations of `("x", "y", "z")`.
+    :param output_axis_order: A 4-tuple indicating the desired output data's
+        three dimensions plus channel axis order. It's any permutations of
+        `("x", "y", "z", "c")`. For now, `"c"` is assumed last.
+    :param src_image_data: The `ImageDataBase` that will be used to read the
+        voxel cuboids for a given point.
+    :param classes: The number of classes used by the network when classifying
+        cuboids.
+    :param target_output: A literal indicating the type of label output dataset
+        should return during training / testing. It is one of `"cell"`
+        (it returns the `Cell` instance), `"label"` (it returns a one-hot
+        vector labeling `Cell.type - 1` as the correct class), or None (not
+        label is returned).
+
+        I.e. if it's None, we do `batch_data = dataset[i]`. Otherwise, it's
+        `batch_data, batche_label = dataset[i]`.
+    :param augment: Whether to augment the dataset with the subsequent
+        parameters.
+    :param augment_likelihood: Value `[0, 1]` with the probability of a data
+        item being augmented. I.e. `0.9` means 90% of the data will have been
+        augmented.
+    :param flippable_axis: A sequence of the dimensions in the output
+        data to reverse, if any, with probability `augment_likelihood`.
+    :param rotate_range: A sequence of floats or sequence of 2-tuples with the
+        radian angle or range of angles to rotate the output data. Each item
+        for the corresponding output data dim, with probability
+        `augment_likelihood`. Or `None` if there's no rotation.
+    :param translate_range: A sequence of floats or sequence of 2-tuples with
+        the pixel distance or range of distance to translate the output data.
+        Each item for the corresponding output data dim, with probability
+        `augment_likelihood`. Or `None` if there's no translation.
+    :param scale_range: A sequence of floats or sequence of 2-tuples with
+        the amount or range of amount to scale the output data. `1` means
+        no scaling. Each item for the corresponding output data dim, with
+        probability `augment_likelihood`. Or `None` if there's no scaling.
     """
 
     points_arr: np.ndarray = None
+    """A generated Nx4 array. Each row is `(x, y, z, type)` with the 3d
+    position of the potential cell and the type of the point (`Cell.type`).
+
+    Units are voxels of the input data (`data_voxel_sizes`).
+    """
 
     src_image_data: ImageDataBase | None = None
+    """
+    The `ImageDataBase` that will be used to read the voxel cuboids for a given
+    point.
+    """
+
+    data_cuboid_voxels: tuple[int, int, int] = 1, 1, 1
+    """A 3-tuple of the number of voxels in a cuboid of the output data.
+
+    The order corresponds to the `output_axis_order`, excluding the channel
+    dim. See also `cuboid_with_channels_size`.
+    """
 
     num_channels: int = 1
+    """
+    The number of channels in the image data / cuboids.
+    """
 
     augmentation: DataAugmentation | None = None
+    """
+    If provided, used to augment the data during training.
+    """
 
     _output_data_dim_reordering: list[int] | None = None
+    """
+    Cached indices that is used with `get_axis_reordering` to convert the
+    cuboids from the input `axis_order` /
+    `src_image_data.data_with_channels_axis_order` to the `output_axis_order`.
+    """
 
     def __init__(
         self,
@@ -428,13 +662,14 @@ class CuboidDatasetBase(Dataset):
         self.axis_order = axis_order
         self.output_axis_order = output_axis_order
 
-        self.data_cuboid_voxels = []
+        data_cuboid_voxels = []
         for data_um, network_um, cuboid_voxels in zip(
             data_voxel_sizes, network_voxel_sizes, network_cuboid_voxels
         ):
-            self.data_cuboid_voxels.append(
+            data_cuboid_voxels.append(
                 get_data_cuboid_voxels(cuboid_voxels, network_um, data_um)
             )
+        self.data_cuboid_voxels = tuple(data_cuboid_voxels)
 
         self.classes = classes
         self.target_output = target_output
@@ -458,6 +693,12 @@ class CuboidDatasetBase(Dataset):
 
     @property
     def cuboid_with_channels_size(self) -> tuple[int, int, int, int]:
+        """A 4-tuple of the number of voxels in the cuboid in the output data
+        and the number of channels.
+
+        The order corresponds to the `output_axis_order`. For now, `"c"` is
+        assumed last.
+        """
         return *self.data_cuboid_voxels, self.num_channels
 
     def __len__(self):
@@ -471,6 +712,9 @@ class CuboidDatasetBase(Dataset):
     def _set_output_data_dim_reordering(
         self, src_image_data: ImageDataBase
     ) -> None:
+        """
+        Sets `_output_data_dim_reordering`.
+        """
         if src_image_data.data_axis_order != self.output_axis_order:
             self._output_data_dim_reordering = get_axis_reordering(
                 ("b", *src_image_data.data_with_channels_axis_order),
@@ -480,6 +724,9 @@ class CuboidDatasetBase(Dataset):
     def _get_single_item(
         self, idx: int
     ) -> torch.Tensor | tuple[torch.Tensor, Any]:
+        """
+        Handles `dataset[i]`, when `i` is an int.
+        """
         point = self.points_arr[idx]
         data = self.get_point_data(idx)
 
@@ -519,6 +766,9 @@ class CuboidDatasetBase(Dataset):
     def _get_multiple_items(
         self, indices: list[int]
     ) -> torch.Tensor | tuple[torch.Tensor, Any]:
+        """
+        Handles `dataset[i]`, when `i` is a list of ints.
+        """
         points = self.points_arr[indices]
 
         data = self.get_points_data(indices)
@@ -558,6 +808,11 @@ class CuboidDatasetBase(Dataset):
         return data, labels
 
     def rescale_to_output_size(self, data: torch.Tensor) -> torch.Tensor:
+        """
+        Takes the input cuboids, ordered already according to the
+        `output_axis_order` with the additional batch dim at the start and
+        scales the cuboids to the network cuboid size.
+        """
         if self.data_voxel_sizes == self.network_voxel_sizes:
             return data
 
@@ -565,6 +820,9 @@ class CuboidDatasetBase(Dataset):
         if len(data.shape) != 5:
             raise ValueError("Needs 5 dimensions: batch, channel and space")
 
+        # our data comes in in output_axis_order order. To scale we need to
+        # convert first to torch_order, which is torch's expected order. We
+        # then re-order back to the output_axis_order before returning.
         torch_order = "b", "c", "z", "y", "x"
         data_order = "b", *self.output_axis_order
         voxel_order = self.axis_order
@@ -586,17 +844,30 @@ class CuboidDatasetBase(Dataset):
 
     def get_point_data(self, point_key: int) -> torch.Tensor:
         """
+        Takes a key used to identify a specific point (typically the index in
+        the points list) and returns the cuboid centered around the point.
 
-        :param point_key:
-        :return: In the output_axis_order order.
+        This handles getting the cuboids for `dataset[i]`, when `i` is an int.
+
+        :param point_key: A unique key used to identify the point. E.g. the
+            index in `points_arr`.
+        :return: The 5d cuboid in the output_axis_order order. With the
+            batch dim as the first axis.
         """
         return self.get_points_data([point_key])[0, ...]
 
     def get_points_data(self, points_key: list[int]) -> torch.Tensor:
         """
+        Takes a list of keys used to identify point (typically the indices in
+        the points list) and returns the cuboids centered around the points.
 
-        :param points_key:
-        :return: In the output_axis_order order.
+        This handles getting the cuboids for `dataset[i]`, when `i` is a list
+        of ints.
+
+        :param points_key: A list of the unique key used to identify the
+            points. E.g. the indices in `points_arr`.
+        :return: The 5d cuboids in the output_axis_order order. With the
+            batch dim as the first axis.
         """
         data = torch.empty(
             (len(points_key), *self.cuboid_with_channels_size),
