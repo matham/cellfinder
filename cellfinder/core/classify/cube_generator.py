@@ -143,6 +143,12 @@ class ImageDataBase:
     points_arr: np.ndarray = None
     """An Nx3 array. Each row is a 3d point with the position of a potential
     cell. Units are voxels of the input data.
+
+    The datatype must be `("x", "<f8"), ("y", "<f8"), ("z", "<f8")` so we can
+    index each column by name. E.g.::
+
+        points = np.zeros(5, dtype=[("x", "<f8"), ("y", "<f8"), ("z", "<f8")])
+        points[0] = ...
     """
 
     num_channels: int = 1
@@ -240,6 +246,14 @@ class CachedStackImageDataBase(ImageDataBase):
     large as the number of processing workers, even if we read z planes
     slightly out of order e.g. if multiple workers request them in parallel
     which are serialized slightly out of order, it should still be very fast.
+
+
+    :param max_axis_0_cuboids_buffered: Each cuboid requires `n` planes
+        along axis 0. With the assumption that data is read from disk in
+        planes of this first axis, buffering these planes is advantages.
+        This determines how many multiples (or fractions) of `n` such planes
+        to buffer, in addition to `n` that is always buffered. So e.g. `1`
+        means `2n` and `0.5` means `1.5n`. `1` is a good default.
     """
 
     stack_shape: tuple[int, int, int]
@@ -402,6 +416,9 @@ class CachedCuboidImageDataBase(ImageDataBase):
     max_cuboids_buffered: int = 0
     """
     The number of most recently read cuboids to keep in memory.
+
+    This will be the number passed to `__init__` plus 1 so at least the last
+    one is always cached.
     """
 
     _cuboids_buffer: OrderedDict[Hashable, torch.Tensor]
@@ -416,7 +433,7 @@ class CachedCuboidImageDataBase(ImageDataBase):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.max_cuboids_buffered = max_cuboids_buffered
+        self.max_cuboids_buffered = max_cuboids_buffered + 1
         self._cuboids_buffer = OrderedDict()
 
     def get_point_cuboid_data(self, point_key: int) -> torch.Tensor:
@@ -429,9 +446,6 @@ class CachedCuboidImageDataBase(ImageDataBase):
             )
             for channel in range(self.num_channels):
                 cuboid[:, :, :, channel] = self.read_cuboid(point_key, channel)
-
-            if not max_cuboids:
-                return cuboid
 
             if len(cuboids_buffer) == max_cuboids:
                 # fifo when last=False
@@ -475,6 +489,11 @@ class CachedTiffCuboidImageData(CachedCuboidImageDataBase):
     """
     A 2d numpy array containing the list of tiff filenames. Each item is the
     list of the filenames of that point's channels.
+
+    E.g.::
+
+        filenames = [("1ch0.tif", "1ch1.tif"), ("2ch0.tif", "2ch1.tif")]
+        filenames_arr = np.array(filenames).astype(np.str_)
     """
 
     def __init__(
@@ -880,25 +899,56 @@ class CuboidDatasetBase(Dataset):
 
 class CuboidThreadedDatasetBase(CuboidDatasetBase):
     """
-    `CuboidDatasetBase` gets the data directly from its `src_image_data`
-    (`ImageDataBase`) instance. If this is run with multiple workers, each
-    in its own sub-process, each worker gets its own copy of `src_image_data`.
+    Adds the ability to share a single `src_image_data` `ImageDataBase`
+    instance among multiple sub-process workers so that only the main
+    process reads the data, while the other processes only handle processing
+    the batches.
 
-    This class adds the ability for the dataset to get the data from the
-    `src_image_data` via a sub-thread in the main process. Each worker uses
-    a queue to request data from this thread, which reads it from disk quickly
-    and sends it back to the worker to process. This ensures that only one
-    thread reads the data so there's no hard drive contention among the
-    workers.
+    `CuboidDatasetBase` loads the data directly via its `src_image_data`
+    (`ImageDataBase`) instance. When a `Dataset` is processed using multiple
+    torch workers, each worker is run in its own sub-process and therefore
+    each worker gets its own copy of `src_image_data` that it reads from.
+    The downside is that the sub-processes are trying to read similar data
+    from disk causing disk contention.
 
-    Additionally, each worker allocates the batch buffer, which is shared
-    in memory with the main thread. The main thread can then directly write
-    to it without having to send data back and forth.
+    This class adds the ability for the dataset to read the data from its
+    `src_image_data` via a sub-thread in the main process. Each worker in
+    its own process uses a queue to request data from this singular
+    sub-thread, which reads it from disk quickly and sends it back to the
+    worker to process (rescale / orient etc.). This ensures that only one
+    thread reads the data from disk.
+
+    Additionally, each worker allocates a batch buffer, which is shared in
+    memory with the main sub-thread as it requests it to read a batch. The main
+    thread can then directly write into it the read data without having to copy
+    the data back and forth.
+
+    `start_dataset_thread` and `stop_dataset_thread` must be called to start
+    and close this main sub-thread. Otherwise, each sub-process worker will
+    have its own copy of the dataset, removing this class' functionality.
+
+    Each worker uses its own queue to communicate with the main thread.
+    So the main thread listens to requests via its own single queue. Each
+    worder's request tells it the points for which to load cuboids and the
+    queue to use to send the data back along. If it encounters an error
+    reading the data, it'll instead send the exception back with that queue
+    so it doesn't hang.
     """
 
     _dataset_thread: ThreadWithException | None = None
+    """The singular sub-thread that all workers use to request data from.
+
+    The thread is created when `start_dataset_thread` is called.
+    """
 
     _worker_queues: list[Queue] = None
+    """
+    The queues used to get back data from the singular main thread.
+
+    Each worker is identified via its
+    `0 <= get_worker_info().id < num_workers`. queue `len(queues) - 1`
+    is used by the main process if that tries reading data.
+    """
 
     def __init__(
         self,
@@ -910,12 +960,16 @@ class CuboidThreadedDatasetBase(CuboidDatasetBase):
     def __getstate__(self):
         state = self.__dict__.copy()
         if self._dataset_thread is not None:
+            # we have to prevent copies of src_image_data so that data is not
+            # duplicated among sub-processes if we use them.
             del state["src_image_data"]
         return state
 
     def get_points_data(self, points_key: list[int]) -> torch.Tensor:
         thread = self._dataset_thread
         if thread is None:
+            # if start_dataset_thread was not called, use the default
+            # functionality of each process reading on its own
             return super().get_points_data(points_key)
 
         data = torch.empty(
@@ -931,6 +985,10 @@ class CuboidThreadedDatasetBase(CuboidDatasetBase):
         queue = queues[queue_id]
 
         thread.send_msg_to_thread(("points", points_key, data, queue_id))
+        # todo: consider adding a long timeout in case the serving thread was
+        #  asked to exit while workers are still waiting for data. But we
+        #  clearly state in the API thread should not be asked to exit while
+        #  workers exist
         msg, value = queue.get(block=True)
         # if there's no error, we just sent back the point
         if msg == "exception":
@@ -941,7 +999,17 @@ class CuboidThreadedDatasetBase(CuboidDatasetBase):
 
         return data
 
-    def start_dataset_thread(self, num_workers: int):
+    def start_dataset_thread(self, num_workers: int) -> None:
+        """
+        Must be called if we want the functionality of this class when using
+        multiple sub-process workers. This creates the singular sub-thread etc.
+
+        :param num_workers: The number of sub-process workers torch will use.
+            If it's zero, meaning only the main process will process the
+            batches, we still use a sub-thread to read the data. If you don't
+            wish this, don't call `start_dataset_thread` and it'll be loaded
+            directly in the main process.
+        """
         # include queue for host thread
         ctx = mp.get_context("spawn")
         queues = [ctx.Queue(maxsize=0) for _ in range(num_workers + 1)]
@@ -954,7 +1022,14 @@ class CuboidThreadedDatasetBase(CuboidDatasetBase):
         )
         self._dataset_thread.start()
 
-    def stop_dataset_thread(self):
+    def stop_dataset_thread(self) -> None:
+        """
+        Must be called to shut down the sub-thread when data loading is done.
+
+        This should only be called once the sub-process workers have stopped
+        reading data, otherwise, if the sub-thread exits and the processes are
+        waiting for returned data in their queues they'll never exit.
+        """
         thread = self._dataset_thread
         if thread is None:
             return
@@ -969,8 +1044,18 @@ class CuboidThreadedDatasetBase(CuboidDatasetBase):
 
 class CuboidStackDataset(CuboidThreadedDatasetBase):
     """
-    Implements `CuboidThreadedDatasetBase` using a `CachedArrayStackImageData`
-    to read the cuboids from array type data (e.g. Dask arrays).
+    Implements `CuboidThreadedDatasetBase` using a `CachedArrayStackImageData`,
+    which reads the cuboids from array type data (e.g. Dask arrays).
+
+
+    :param signal_array: The signal data array.
+    :param background_array: The background data array.
+    :param max_axis_0_cuboids_buffered: Each cuboid requires `n` planes
+        along axis 0. With the assumption that data is read from disk in
+        planes of this first axis, buffering these planes is advantages.
+        This determines how many multiples (or fractions) of `n` such planes
+        to buffer, in addition to `n` that is always buffered. So e.g. `1`
+        means `2n` and `0.5` means `1.5n`. `1` is a good default.
     """
 
     def __init__(
@@ -1011,6 +1096,11 @@ class CuboidStackDataset(CuboidThreadedDatasetBase):
         self._set_output_data_dim_reordering(self.src_image_data)
 
     def point_has_full_cuboid(self, point: np.ndarray) -> bool:
+        """
+        Takes a 3d point and returns whether a cuboid centered on this point
+        is fully contained within the signal / background array. I.e. it's not
+        too close to the edges etc.
+        """
         for ax, axis_size, cuboid_size in zip(
             self.axis_order, self.stack_shape, self.data_cuboid_voxels
         ):
@@ -1026,8 +1116,8 @@ class CuboidStackDataset(CuboidThreadedDatasetBase):
 
 class CuboidTiffDataset(CuboidThreadedDatasetBase):
     """
-    Implements `CuboidThreadedDatasetBase` using a `CachedTiffCuboidImageData`
-    to read the cuboids from individual tiff files.
+    Implements `CuboidThreadedDatasetBase` using a `CachedTiffCuboidImageData`,
+    which reads the cuboids from individual tiff files.
     """
 
     def __init__(

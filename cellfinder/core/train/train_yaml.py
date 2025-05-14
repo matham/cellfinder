@@ -254,6 +254,12 @@ def parse_yaml(yaml_files, section="data"):
 
 
 def get_tiff_files(yaml_contents: list[dict]) -> list[list[TiffFile]]:
+    """
+    Takes a yaml file representing multiple folders each containing many
+    extracted cube tiff files. It returns a corresponding list of lists of
+    `TiffFile`, where in the sub-list each `TiffFile` represents a tiff in
+    the given directory.
+    """
     tiff_lists = []
     for d in yaml_contents:
         if d["bg_channel"] < 0:
@@ -283,6 +289,7 @@ def get_tiff_files(yaml_contents: list[dict]) -> list[list[TiffFile]]:
 def make_tiff_lists(
     tiff_files: list[list[TiffFile]],
 ) -> tuple[list[list[str]], list[Cell]]:
+
     cells = []
     filenames = []
 

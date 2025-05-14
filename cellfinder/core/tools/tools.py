@@ -1,6 +1,6 @@
 from functools import partial, wraps
 from random import getrandbits, uniform
-from typing import Any, Callable, Optional, Type
+from typing import Any, Callable, Optional, Sequence, Type
 
 import numpy as np
 import torch
@@ -110,6 +110,8 @@ def get_data_converter(
         A function that takes a single input data parameter and returns
         the converted data.
     """
+    # converter functions must be global functions so they can be serialized
+    # and passed to other processes
     if not np.issubdtype(dest_dtype, np.float32) and not np.issubdtype(
         dest_dtype, np.float64
     ):
@@ -318,8 +320,23 @@ def all_elements_equal(x) -> bool:
 
 
 def get_axis_reordering(
-    in_order: tuple[Any, ...], out_order: tuple[Any, ...]
+    in_order: Sequence[Any], out_order: Sequence[Any]
 ) -> list[int]:
+    """
+    Helps re-order a tensor, given an arbitrary labeled input and output axis
+    ordering.
+
+    E.g. if the original ordering of 3d data was (a, b, c) and we want
+    (b, a, c)::
+
+        reordering = get_axis_reordering(("a", "b", "c"), ("b", "a", "c"))
+        reordered = torch.permute(data, reordering)
+
+    :param in_order: A sequence of named axes. They could be arbitrary values.
+    :param out_order: A re-ordered sequence of in_order with the desired order.
+    :return: A list of indices that can be passed to `torch.permute` to reorder
+        the data tensor.
+    """
     indices = []
     for value in out_order:
         indices.append(in_order.index(value))
