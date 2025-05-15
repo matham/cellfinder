@@ -101,11 +101,11 @@ def test_tiff_image_data(tiff_cubes):
         filenames_arr=np.array(filenames).astype(np.str_),
         max_cuboids_buffered=3,
         data_axis_order=("x", "y", "z"),
-        cuboid_size=(3, 3, 5),
+        cuboid_size=size,
         points_arr=points,
     )
 
-    assert tiffs.cuboid_with_channels_size == (3, 3, 5, 2)
+    assert tiffs.cuboid_with_channels_size == (*size, 2)
     assert tiffs.data_with_channels_axis_order == ("x", "y", "z", "c")
 
     # manually get the cubes around the points
@@ -159,7 +159,7 @@ def test_tiff_image_data_cache(tiff_cubes, cached, mocker: MockerFixture):
         filenames_arr=np.array(filenames).astype(np.str_),
         max_cuboids_buffered=cached,
         data_axis_order=("x", "y", "z"),
-        cuboid_size=(3, 3, 5),
+        cuboid_size=size,
         points_arr=points,
     )
 

@@ -18,7 +18,7 @@ from cellfinder.core.classify.augment import DataAugmentation
 from cellfinder.core.tools.threading import (
     EOFSignal,
     ExecutionFailure,
-    ThreadWithException,
+    ThreadWithExceptionMPSafe,
 )
 from cellfinder.core.tools.tools import get_axis_reordering, get_data_converter
 
@@ -32,7 +32,7 @@ class StackSizeError(Exception):
 
 
 def _read_data_send_cuboids(
-    thread: ThreadWithException,
+    thread: ThreadWithExceptionMPSafe,
     dataset: "ImageDataBase",
     queues: list[Queue],
 ) -> None:
@@ -51,7 +51,8 @@ def _read_data_send_cuboids(
     If there's an exception serving a particular request, the indicated queue
     is sent back the exception, instead of the normal data response.
 
-    :param thread: The `ThreadWithException`, automatically passed to the func.
+    :param thread: The `ThreadWithExceptionMPSafe`, automatically passed to the
+        func.
     :param dataset: The `ImageDataBase` used to read the data and cubes.
     :param queues: A list of queues for sending data. Each request to the
         sub-thread indicates which queue in the list to send the cubes. This
@@ -935,7 +936,7 @@ class CuboidThreadedDatasetBase(CuboidDatasetBase):
     so it doesn't hang.
     """
 
-    _dataset_thread: ThreadWithException | None = None
+    _dataset_thread: ThreadWithExceptionMPSafe | None = None
     """The singular sub-thread that all workers use to request data from.
 
     The thread is created when `start_dataset_thread` is called.
@@ -1015,7 +1016,7 @@ class CuboidThreadedDatasetBase(CuboidDatasetBase):
         queues = [ctx.Queue(maxsize=0) for _ in range(num_workers + 1)]
         self._worker_queues = queues
 
-        self._dataset_thread = ThreadWithException(
+        self._dataset_thread = ThreadWithExceptionMPSafe(
             target=_read_data_send_cuboids,
             args=(self.src_image_data, queues),
             pass_self=True,
