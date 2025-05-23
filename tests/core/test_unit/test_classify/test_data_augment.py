@@ -29,9 +29,10 @@ def test_augment_translate(cube_with_side_dot):
     c, y, x, z = cube_with_side_dot.shape
     translate_range = [(1 / 11, 1 / 11), (2 / 11, 2 / 11), (1 / 7, 1 / 7)]
     augmenter = DataAugmentation(
-        volume_size=(y, x, z),
+        volume_size={"x": x, "y": y, "z": z},
         augment_likelihood=1,
         translate_range=translate_range,
+        data_axis_order=("c", "y", "x", "z"),
     )
     assert augmenter.update_parameters(), "Parameters should be randomized"
     augmented = augmenter(cube_with_side_dot)
@@ -46,9 +47,10 @@ def test_augment_translate(cube_with_side_dot):
 def test_augment_rotate(cube_with_side_dot):
     c, y, x, z = cube_with_side_dot.shape
     augmenter = DataAugmentation(
-        volume_size=(y, x, z),
+        volume_size={"x": x, "y": y, "z": z},
         augment_likelihood=1,
         rotate_range=[(0, 0), (0, 0), (math.pi / 2, math.pi / 2)],
+        data_axis_order=("c", "y", "x", "z"),
     )
     assert augmenter.update_parameters(), "Parameters should be randomized"
     augmented = augmenter(cube_with_side_dot)
@@ -68,9 +70,10 @@ def test_augment_rotate(cube_with_side_dot):
 def test_augment_scale(cube_with_center_dot):
     c, y, x, z = cube_with_center_dot.shape
     augmenter = DataAugmentation(
-        volume_size=(y, x, z),
+        volume_size={"x": x, "y": y, "z": z},
         augment_likelihood=1,
         scale_range=((3, 3),) * 3,
+        data_axis_order=("c", "y", "x", "z"),
     )
     assert augmenter.update_parameters(), "Parameters should be randomized"
     augmented = augmenter(cube_with_center_dot)
@@ -90,9 +93,10 @@ def test_augment_scale(cube_with_center_dot):
 def test_augment_axis_flip(cube_with_side_dot):
     c, y, x, z = cube_with_side_dot.shape
     augmenter = DataAugmentation(
-        volume_size=(y, x, z),
+        volume_size={"x": x, "y": y, "z": z},
         augment_likelihood=1,
         flippable_axis=(0, 1),
+        data_axis_order=("c", "y", "x", "z"),
     )
     assert augmenter.update_parameters(), "Parameters should be randomized"
     augmented = augmenter(cube_with_side_dot)
