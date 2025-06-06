@@ -30,7 +30,7 @@ class DataAugmentation:
     DIM_ORDER = "c", "y", "x", "z"
     """
     The dimension order we internally expect the data to be. The user passes
-    in data in `data_axis_order` order that we convert to this order before
+    in data in `data_dim_order` order that we convert to this order before
     handling.
     """
 
@@ -43,7 +43,7 @@ class DataAugmentation:
     def __init__(
         self,
         volume_size: dict[str, int],
-        data_axis_order: tuple[DIM, DIM, DIM, DIM],
+        data_dim_order: tuple[DIM, DIM, DIM, DIM],
         augment_likelihood: float,
         flippable_axis: Sequence[int] = (),
         translate_range: RandRange = None,
@@ -51,19 +51,23 @@ class DataAugmentation:
         rotate_range: RandRange = None,
     ):
         volume_values = list(volume_size.values())
-        self.needs_isotropy = max(volume_values) != min(volume_values)
+        self.needs_affine = translate_range or scale_range or rotate_range
+        self.needs_isotropy = (
+            max(volume_values) != min(volume_values) and self.needs_affine
+        )
         self.isotropic_volume_size = (max(volume_values),) * 3
 
         self._volume_size = [volume_size[ax] for ax in self.AXIS_ORDER]
 
+        self._input_axis_order = [d for d in data_dim_order if d != "c"]
         self._data_reordering = []
         self._data_reordering_back = []
-        self._compute_data_reordering(data_axis_order)
+        self._compute_data_reordering(data_dim_order)
 
         # do prob = 1 because we decide when to apply it
         self.affine = RandAffine(
             prob=1,
-            rotate_range=rotate_range,
+            rotate_range=self._fix_rotate_range(rotate_range),
             shear_range=None,
             translate_range=self._fix_translate_range(translate_range),
             scale_range=self._fix_scale_range(scale_range),
@@ -72,31 +76,61 @@ class DataAugmentation:
             lazy=False,
         )
 
-        self.flippable_axis = flippable_axis
+        self._flippable_axis = self._fix_flippable_axis(flippable_axis)
         self.augment_likelihood = augment_likelihood
 
         self.axes_to_flip: list[int] = []
         self.do_affine = False
 
     def _compute_data_reordering(
-        self, data_axis_order: tuple[DIM, DIM, DIM, DIM]
+        self, data_dim_order: tuple[DIM, DIM, DIM, DIM]
     ) -> None:
         self._data_reordering = []
         self._data_reordering_back = []
 
-        if data_axis_order != self.DIM_ORDER:
+        if data_dim_order != self.DIM_ORDER:
             self._data_reordering = get_axis_reordering(
-                data_axis_order,
+                data_dim_order,
                 self.DIM_ORDER,
             )
             self._data_reordering_back = get_axis_reordering(
                 self.DIM_ORDER,
-                data_axis_order,
+                data_dim_order,
             )
+
+    def _fix_flippable_axis(
+        self, flippable_axis: Sequence[int]
+    ) -> Sequence[int]:
+        if not flippable_axis:
+            return flippable_axis
+        if self._input_axis_order == self.AXIS_ORDER:
+            return flippable_axis
+
+        fixed_axis = []
+        for ax_i in flippable_axis:
+            ax = self._input_axis_order[ax_i]
+            fixed_axis.append(self.AXIS_ORDER.index(ax))
+        return fixed_axis
+
+    def _fix_rotate_range(self, rotate_range: RandRange) -> RandRange:
+        if rotate_range is None:
+            return None
+        if len(rotate_range) != 3:
+            raise ValueError("Must specify rotate value for each dimension")
+        if self._input_axis_order == self.AXIS_ORDER:
+            return rotate_range
+
+        fixed_range = [None, None, None]
+        for i in range(3):
+            new_i = self.AXIS_ORDER.index(self._input_axis_order[i])
+            fixed_range[new_i] = rotate_range[i]
+        return fixed_range
 
     def _fix_translate_range(self, translate_range: RandRange) -> RandRange:
         if translate_range is None:
             return None
+        if len(translate_range) != 3:
+            raise ValueError("Must specify translate value for each dimension")
 
         translate_range = list(translate_range)
         for i, (val, size) in enumerate(
@@ -110,11 +144,20 @@ class DataAugmentation:
             else:
                 translate_range[i] = -val * size
 
-        return translate_range
+        if self._input_axis_order == self.AXIS_ORDER:
+            return translate_range
+
+        fixed_range = [None, None, None]
+        for i in range(3):
+            new_i = self.AXIS_ORDER.index(self._input_axis_order[i])
+            fixed_range[new_i] = translate_range[i]
+        return fixed_range
 
     def _fix_scale_range(self, scale_range: RandRange) -> RandRange:
         if scale_range is None:
             return None
+        if len(scale_range) != 3:
+            raise ValueError("Must specify scale value for each dimension")
 
         scale_range = list(scale_range)
         for i, val in enumerate(scale_range):
@@ -125,16 +168,27 @@ class DataAugmentation:
             else:
                 scale_range[i] = 1 / val - 1
 
-        return scale_range
+        if self._input_axis_order == self.AXIS_ORDER:
+            return scale_range
+
+        fixed_range = [None, None, None]
+        for i in range(3):
+            new_i = self.AXIS_ORDER.index(self._input_axis_order[i])
+            fixed_range[new_i] = scale_range[i]
+        return fixed_range
 
     def update_parameters(self) -> bool:
-        self.do_affine = random_bool(likelihood=1 - self.augment_likelihood)
+        self.do_affine = False
+        if self.needs_affine:
+            self.do_affine = random_bool(
+                likelihood=1 - self.augment_likelihood
+            )
         self.update_flip_parameters()
 
         return bool(self.do_affine or self.axes_to_flip)
 
     def update_flip_parameters(self) -> None:
-        flippable_axis = self.flippable_axis
+        flippable_axis = self._flippable_axis
         if not flippable_axis:
             return
 

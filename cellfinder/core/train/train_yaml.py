@@ -63,10 +63,6 @@ CUBE_HEIGHT = 50
 CUBE_DEPTH = 20
 
 
-def _collate_identity(data):
-    return data[0]
-
-
 def valid_model_depth(depth):
     """
     Ensures a correct existing_model is chosen
@@ -354,6 +350,7 @@ def get_dataloader(
         target_output="label",
         augment=augment,
     )
+    # we use our own sampler so we can control the ordering
     sampler = CuboidBatchSampler(
         dataset=dataset,
         batch_size=batch_size,
@@ -365,7 +362,7 @@ def get_dataloader(
         num_workers=n_processes,
         drop_last=False,
         pin_memory=pin_memory,
-        collate_fn=_collate_identity,
+        collate_fn=CuboidBatchSampler.loader_collate_identity,
     )
     return data_loader, dataset
 

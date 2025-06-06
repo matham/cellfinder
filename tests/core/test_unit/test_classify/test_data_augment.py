@@ -32,7 +32,7 @@ def test_augment_translate(cube_with_side_dot):
         volume_size={"x": x, "y": y, "z": z},
         augment_likelihood=1,
         translate_range=translate_range,
-        data_axis_order=("c", "y", "x", "z"),
+        data_dim_order=("c", "y", "x", "z"),
     )
     assert augmenter.update_parameters(), "Parameters should be randomized"
     augmented = augmenter(cube_with_side_dot)
@@ -50,7 +50,7 @@ def test_augment_rotate(cube_with_side_dot):
         volume_size={"x": x, "y": y, "z": z},
         augment_likelihood=1,
         rotate_range=[(0, 0), (0, 0), (math.pi / 2, math.pi / 2)],
-        data_axis_order=("c", "y", "x", "z"),
+        data_dim_order=("c", "y", "x", "z"),
     )
     assert augmenter.update_parameters(), "Parameters should be randomized"
     augmented = augmenter(cube_with_side_dot)
@@ -73,7 +73,7 @@ def test_augment_scale(cube_with_center_dot):
         volume_size={"x": x, "y": y, "z": z},
         augment_likelihood=1,
         scale_range=((3, 3),) * 3,
-        data_axis_order=("c", "y", "x", "z"),
+        data_dim_order=("c", "y", "x", "z"),
     )
     assert augmenter.update_parameters(), "Parameters should be randomized"
     augmented = augmenter(cube_with_center_dot)
@@ -96,7 +96,7 @@ def test_augment_axis_flip(cube_with_side_dot):
         volume_size={"x": x, "y": y, "z": z},
         augment_likelihood=1,
         flippable_axis=(0, 1),
-        data_axis_order=("c", "y", "x", "z"),
+        data_dim_order=("c", "y", "x", "z"),
     )
     assert augmenter.update_parameters(), "Parameters should be randomized"
     augmented = augmenter(cube_with_side_dot)

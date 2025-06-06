@@ -18,10 +18,6 @@ from cellfinder.core.classify.tools import get_model
 from cellfinder.core.train.train_yaml import depth_type, models
 
 
-def _collate_identity(data):
-    return data[0]
-
-
 def main(
     points: List[Cell],
     signal_array: types.array,
@@ -76,6 +72,7 @@ def main(
         axis_order=("z", "y", "x"),
         max_axis_0_cuboids_buffered=1,
     )
+    # we use our own sampler so we can control the ordering
     sampler = CuboidBatchSampler(
         dataset=dataset,
         batch_size=batch_size,
@@ -88,7 +85,7 @@ def main(
         num_workers=workers,
         drop_last=False,
         pin_memory=pin_memory,
-        collate_fn=_collate_identity,
+        collate_fn=CuboidBatchSampler.loader_collate_identity,
     )
 
     if trained_model and Path(trained_model).suffix == ".h5":

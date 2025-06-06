@@ -34,7 +34,7 @@ class StackSizeError(Exception):
 def _read_data_send_cuboids(
     thread: ThreadWithExceptionMPSafe,
     dataset: "ImageDataBase",
-    queues: list[Queue],
+    queues: Sequence[Queue],
 ) -> None:
     """
     Function run by sub-thread that reads data from a dataset, extracts the
@@ -217,7 +217,7 @@ class ImageDataBase:
         raise NotImplementedError
 
     def get_point_batch_cuboid_data(
-        self, batch: torch.Tensor, points_key: list[int]
+        self, batch: torch.Tensor, points_key: Sequence[int]
     ) -> None:
         """
         Similar to `get_point_cuboid_data` except it passes a sequence of keys
@@ -305,15 +305,15 @@ class CachedStackImageDataBase(ImageDataBase):
         return data
 
     def get_point_batch_cuboid_data(
-        self, batch: torch.Tensor, points_key: list[int]
+        self, batch: torch.Tensor, points_key: Sequence[int]
     ) -> None:
         """
         See base-class, except `points_key` *is* the plane index in the array
         of planes.
         """
-        if len(points_key) != batch.shape[0]:
+        if (len(points_key), *self.cuboid_with_channels_size) != batch.shape:
             raise ValueError(
-                "Expected the number of points to match the batch size"
+                "Expected the buffer to match the points X cubes shape"
             )
 
         points_arr = self.points_arr
@@ -384,7 +384,7 @@ class CachedArrayStackImageData(CachedStackImageDataBase):
 
     def __init__(
         self,
-        input_arrays: list[types.array],
+        input_arrays: Sequence[types.array],
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -458,11 +458,11 @@ class CachedCuboidImageDataBase(ImageDataBase):
         return cuboids_buffer[point_key]
 
     def get_point_batch_cuboid_data(
-        self, batch: torch.Tensor, points_key: list[int]
+        self, batch: torch.Tensor, points_key: Sequence[int]
     ) -> None:
-        if len(points_key) != batch.shape[0]:
+        if (len(points_key), *self.cuboid_with_channels_size) != batch.shape:
             raise ValueError(
-                "Expected the number of points to match the batch size"
+                "Expected the buffer to match the points X cubes shape"
             )
 
         for i, point_key in enumerate(points_key):
@@ -630,9 +630,9 @@ class CuboidDatasetBase(Dataset):
 
     def __init__(
         self,
-        points: list[Cell],
+        points: Sequence[Cell],
         data_voxel_sizes: tuple[float, float, float],
-        network_voxel_sizes: tuple[float, float, float],
+        network_voxel_sizes: tuple[float, float, float] = (5, 1, 1),
         network_cuboid_voxels: tuple[int, int, int] = (20, 50, 50),
         axis_order: tuple[AXIS, AXIS, AXIS] = ("z", "y", "x"),
         output_axis_order: tuple[DIM, DIM, DIM, DIM] = ("y", "x", "z", "c"),
@@ -663,6 +663,8 @@ class CuboidDatasetBase(Dataset):
                 f"Expected the axis order to list x, y, z, c, but got "
                 f"{output_axis_order}"
             )
+        if output_axis_order[-1] != "c":
+            raise ValueError("output_axis_order must have c last, for now")
 
         self.points_arr = np.empty(
             len(points),
@@ -724,7 +726,7 @@ class CuboidDatasetBase(Dataset):
     def __len__(self):
         return len(self.points_arr)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int | Sequence[int]):
         if isinstance(idx, Integral):
             return self._get_single_item(idx)
         return self._get_multiple_items(idx)
@@ -784,12 +786,13 @@ class CuboidDatasetBase(Dataset):
         return data, label
 
     def _get_multiple_items(
-        self, indices: list[int]
+        self, indices: Sequence[int]
     ) -> torch.Tensor | tuple[torch.Tensor, Any]:
         """
         Handles `dataset[i]`, when `i` is a list of ints.
         """
-        points = self.points_arr[indices]
+        # numpy arrays can't be indexed with tuples
+        points = self.points_arr[list(indices)]
 
         data = self.get_points_data(indices)
         if self._output_data_dim_reordering is not None:
@@ -876,7 +879,7 @@ class CuboidDatasetBase(Dataset):
         """
         return self.get_points_data([point_key])[0, ...]
 
-    def get_points_data(self, points_key: list[int]) -> torch.Tensor:
+    def get_points_data(self, points_key: Sequence[int]) -> torch.Tensor:
         """
         Takes a list of keys used to identify point (typically the indices in
         the points list) and returns the cuboids centered around the points.
@@ -966,7 +969,7 @@ class CuboidThreadedDatasetBase(CuboidDatasetBase):
             del state["src_image_data"]
         return state
 
-    def get_points_data(self, points_key: list[int]) -> torch.Tensor:
+    def get_points_data(self, points_key: Sequence[int]) -> torch.Tensor:
         thread = self._dataset_thread
         if thread is None:
             # if start_dataset_thread was not called, use the default
@@ -1150,7 +1153,7 @@ class CuboidTiffDataset(CuboidThreadedDatasetBase):
 class CuboidBatchSampler(Sampler):
     """
     Custom Sampler for our `CuboidDatasetBase`. It can randomize the order in
-    which it samples the points, while respecting that each batch contains
+    which it samples the points, while respecting that batches contain
     samples from the same plane (so each batch can be efficiently read). Or
     it can sort the sampler by a specific axis in the data to load the data
     efficiently.
@@ -1162,19 +1165,11 @@ class CuboidBatchSampler(Sampler):
         batch_size: int,
         auto_shuffle: bool = False,
         sort_by_axis: str | None = None,
-        segregate_by_axis: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
-        if segregate_by_axis and sort_by_axis is None:
-            raise ValueError(
-                "Asked to segregate by axis, but an axis for sorting was "
-                "not provided"
-            )
-
         self.batch_size = batch_size
         self.auto_shuffle = auto_shuffle
-        self.segregate_by_axis = segregate_by_axis
 
         if sort_by_axis is None:
             plane_indices = [
@@ -1205,14 +1200,9 @@ class CuboidBatchSampler(Sampler):
             indices = [rng.permuted(items) for items in indices]
 
         batches = []
-        if self.segregate_by_axis:
-            for arr in indices:
-                for i in range(math.ceil(len(arr) / batch_size)):
-                    batches.append(arr[i * batch_size : (i + 1) * batch_size])
-        else:
-            arr = np.concatenate(indices)
-            for i in range(math.ceil(len(arr) / batch_size)):
-                batches.append(arr[i * batch_size : (i + 1) * batch_size])
+        arr = np.concatenate(indices)
+        for i in range(math.ceil(len(arr) / batch_size)):
+            batches.append(arr[i * batch_size : (i + 1) * batch_size])
 
         return batches
 
@@ -1221,3 +1211,7 @@ class CuboidBatchSampler(Sampler):
 
     def __iter__(self):
         yield from self.get_batches(self.auto_shuffle)
+
+    @staticmethod
+    def loader_collate_identity(data):
+        return data[0]
