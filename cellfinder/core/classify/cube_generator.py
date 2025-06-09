@@ -678,9 +678,9 @@ class CuboidDatasetBase(Dataset):
             data[i]["type"] = cell.type
 
         self.src_image_data = src_image_data
-        self.data_voxel_sizes = data_voxel_sizes
-        self.network_voxel_sizes = network_voxel_sizes
-        self.network_cuboid_voxels = network_cuboid_voxels
+        self.data_voxel_sizes = tuple(data_voxel_sizes)
+        self.network_voxel_sizes = tuple(network_voxel_sizes)
+        self.network_cuboid_voxels = tuple(network_cuboid_voxels)
         self.axis_order = axis_order
         self.output_axis_order = output_axis_order
 
@@ -692,6 +692,8 @@ class CuboidDatasetBase(Dataset):
                 get_data_cuboid_voxels(cuboid_voxels, network_um, data_um)
             )
         self.data_cuboid_voxels = tuple(data_cuboid_voxels)
+        if len(self.data_cuboid_voxels) != 3:
+            raise ValueError("sizes must be length 3 for the 3 axes")
 
         self.classes = classes
         self.target_output = target_output
@@ -1152,11 +1154,40 @@ class CuboidTiffDataset(CuboidThreadedDatasetBase):
 
 class CuboidBatchSampler(Sampler):
     """
-    Custom Sampler for our `CuboidDatasetBase`. It can randomize the order in
-    which it samples the points, while respecting that batches contain
-    samples from the same plane (so each batch can be efficiently read). Or
-    it can sort the sampler by a specific axis in the data to load the data
-    efficiently.
+    Custom Sampler for our `CuboidDatasetBase` that helps with sampling planes
+    of data.
+
+    It is used as::
+
+        dataset = CuboidStackDataset(...)
+        sampler = CuboidBatchSampler(dataset=dataset, ...)
+        data_loader = torch.utils.data.DataLoader(
+            dataset=dataset,
+            sampler=sampler,
+            collate_fn=CuboidBatchSampler.loader_collate_identity,
+            ...
+        )
+
+    Or e.g. just::
+
+        dataset = CuboidStackDataset(...)
+        sampler = CuboidBatchSampler(dataset=dataset, ...)
+        samples = list(sampler)
+
+    To get the batches values.
+
+    `loader_collate_identity` must be used as an argument to `collate_fn` when
+    used with a `DataLoader`. Similarly, `CuboidBatchSampler` is doing the
+    shuffling instead of the `DataLoader` itself so `batch_size` and `shuffle`
+    shouldn't be used if you use this sampler.
+
+    :param dataset: The `CuboidDatasetBase` that will be sampled.
+    :param batch_size: The size of the batches that `CuboidBatchSampler` will
+        yield to the data loader.
+    :param auto_shuffle: If True, every time we create an iterator of the
+        sampler, the data is shuffled. E.g. every epoch when we get the data,
+        the data is reshuffled. If `sort_by_axis` is True,
+    :param sort_by_axis:
     """
 
     def __init__(
@@ -1172,18 +1203,25 @@ class CuboidBatchSampler(Sampler):
         self.auto_shuffle = auto_shuffle
 
         if sort_by_axis is None:
+            # if not sorted, we just have an array of all the data. When
+            # shuffling later, this array is shuffled
             plane_indices = [
                 np.arange(len(dataset.points_arr), dtype=np.int64)
             ]
         else:
+            # if it is sorted, then sort and segregate into arrays split by
+            # the unique values of the given axis. When shuffling later, each
+            # segregated array is shuffled separately so the sorting is
+            # respected
             points_raw = defaultdict(list)
             for i, point in enumerate(dataset.points_arr):
                 points_raw[point[sort_by_axis]].append(i)
             points_sorted = sorted(points_raw.items(), key=lambda x: x[0])
 
+            # convert the segregated lists into arrays
             plane_indices = [
                 np.array(indices, dtype=np.int64)
-                for plane, indices in points_sorted
+                for _, indices in points_sorted
             ]
 
         self.plane_indices = plane_indices
@@ -1196,10 +1234,18 @@ class CuboidBatchSampler(Sampler):
 
         if shuffle:
             rng = np.random.default_rng()
+            # if sorted, that each item is an array of the indices of points
+            # with the same plane value. and the overall indices is sorted by
+            # those values. So we sort each item separately so it remains
+            # sorted.
             # permuted creates copy that is shuffled
             indices = [rng.permuted(items) for items in indices]
 
         batches = []
+        # whether sorted or not, make it one giant array and create batches.
+        # If sorted, a batch may have multiple plane indices, e.g. if there's
+        # only one point for a given plane, but they are still sorted across
+        # batches. So only the last batch may not be a full batch.
         arr = np.concatenate(indices)
         for i in range(math.ceil(len(arr) / batch_size)):
             batches.append(arr[i * batch_size : (i + 1) * batch_size])
@@ -1214,4 +1260,8 @@ class CuboidBatchSampler(Sampler):
 
     @staticmethod
     def loader_collate_identity(data):
+        """
+        Function that should be used as the `collate_fn` argument for
+        `torch.utils.data.DataLoader` so the sampler will work correctly.
+        """
         return data[0]
