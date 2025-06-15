@@ -1,3 +1,4 @@
+from functools import partial
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -12,7 +13,7 @@ from magicgui.widgets import ProgressBar
 from napari.qt.threading import thread_worker
 from napari.utils.notifications import show_info
 from qt_niu.dialog import display_warning
-from qt_niu.interaction import add_button, add_combobox
+from qt_niu.interaction import add_button, add_combobox, add_float_box
 from qtpy import QtCore
 from qtpy.QtWidgets import (
     QComboBox,
@@ -23,7 +24,9 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from cellfinder.core.classify.cube_generator import CuboidStackDataset
+from cellfinder.core.classify.cube_generator import (
+    CuboidStackDataset,
+)
 
 # Constants used throughout
 WINDOW_HEIGHT = 750
@@ -162,6 +165,9 @@ class CurationWidget(QWidget):
 
         self.setLayout(self.layout)
 
+    def _set_voxel_size(self, value: float, index: int) -> None:
+        self.voxel_sizes[index] = value
+
     def add_loading_panel(self, row: int, column: int = 0):
         self.load_data_panel = QGroupBox("Load data")
         self.load_data_layout = QGridLayout()
@@ -183,32 +189,68 @@ class CurationWidget(QWidget):
             2,
             callback=self.set_background_image,
         )
+        box = add_float_box(
+            self.load_data_layout,
+            self.voxel_sizes[0],
+            0,
+            1000,
+            "Voxel size (z)",
+            0.01,
+            tooltip="Size of your voxels in the axial dimension (microns)",
+            row=3,
+        )
+        box.valueChanged.connect(partial(self._set_voxel_size, index=0))
+
+        box = add_float_box(
+            self.load_data_layout,
+            self.voxel_sizes[1],
+            0,
+            1000,
+            "Voxel size (y)",
+            0.01,
+            tooltip="Size of your voxels in the y direction "
+            "(top to bottom) (microns)",
+            row=4,
+        )
+        box.valueChanged.connect(partial(self._set_voxel_size, index=1))
+        box = add_float_box(
+            self.load_data_layout,
+            self.voxel_sizes[2],
+            0,
+            1000,
+            "Voxel size (x)",
+            0.01,
+            tooltip="Size of your voxels in the x direction "
+            "(left to right) (microns)",
+            row=5,
+        )
+        box.valueChanged.connect(partial(self._set_voxel_size, index=2))
         self.training_data_cell_choice, _ = add_combobox(
             self.load_data_layout,
             "Training data (cells)",
             self.point_layer_names,
-            3,
+            6,
             callback=self.set_training_data_cell,
         )
         self.training_data_non_cell_choice, _ = add_combobox(
             self.load_data_layout,
             "Training_data (non_cells)",
             self.point_layer_names,
-            row=4,
+            row=7,
             callback=self.set_training_data_non_cell,
         )
         self.mark_as_cell_button = add_button(
             "Mark as cell(s)",
             self.load_data_layout,
             self.mark_as_cell,
-            row=5,
+            row=8,
             tooltip="Mark all selected points as non cell. Shortcut: 'c'",
         )
         self.mark_as_non_cell_button = add_button(
             "Mark as non cell(s)",
             self.load_data_layout,
             self.mark_as_non_cell,
-            row=5,
+            row=8,
             column=1,
             tooltip="Mark all selected points as non cell. Shortcut: 'x'",
         )
@@ -216,13 +258,13 @@ class CurationWidget(QWidget):
             "Add training data layers",
             self.load_data_layout,
             self.add_training_data,
-            row=6,
+            row=9,
         )
         self.save_training_data_button = add_button(
             "Save training data",
             self.load_data_layout,
             self.save_training_data,
-            row=6,
+            row=9,
             column=1,
         )
         self.load_data_layout.setColumnMinimumWidth(0, COLUMN_WIDTH)
