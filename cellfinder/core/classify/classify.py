@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import keras
-import numpy as np
+import torch
 from brainglobe_utils.cells.cells import Cell
 from brainglobe_utils.general.system import get_num_processes
 from torch.utils.data import DataLoader
@@ -116,18 +116,20 @@ def main(
     finally:
         dataset.stop_dataset_thread()
 
-    predictions = predictions.round()
-    predictions = predictions.astype("uint16")
-
-    predictions = np.argmax(predictions, axis=1)
+    predictions = torch.argmax(torch.from_numpy(predictions), dim=1)
     points_list = []
 
     # only go through the "extractable" points
-    for idx, arr in enumerate(dataset.points_arr):
-        cell = Cell(
-            (arr["x"], arr["y"], arr["z"]), cell_type=predictions[idx] + 1
-        )
-        points_list.append(cell)
+    k = 0
+    for arr in sampler:
+        for i in arr:
+            p = dataset.points_arr[i]
+            cell = Cell(
+                (p["x"], p["y"], p["z"]),
+                cell_type=(predictions[k] + 1).item(),
+            )
+            points_list.append(cell)
+            k += 1
 
     time_elapsed = datetime.now() - start_time
     logger.info(
