@@ -23,8 +23,10 @@ from qtpy.QtWidgets import (
     QLabel,
     QWidget,
 )
+from torch.utils.data import DataLoader
 
 from cellfinder.core.classify.cube_generator import (
+    CuboidBatchSampler,
     CuboidStackDataset,
 )
 
@@ -661,26 +663,41 @@ class CurationWidget(QWidget):
                 max_axis_0_cuboids_buffered=1,
                 target_output="cell",
             )
+            # use sampler and data loader so we can use the z sorting for
+            # better caching. Potentially also for multiple workers.
+            sampler = CuboidBatchSampler(
+                dataset=cube_generator,
+                batch_size=1,
+                sort_by_axis="z",
+            )
+            dataloader = DataLoader(
+                cube_generator,
+                sampler=sampler,
+                num_workers=0,
+                collate_fn=CuboidBatchSampler.loader_collate_identity,
+            )
             # Set up progress bar
             yield {
                 "value": 0,
                 "min": 0,
-                "max": len(cube_generator),
+                "max": len(dataloader),
             }
 
-            for i in range(len(cube_generator)):
-                image, cell = cube_generator[i]
-                image = image.numpy().astype(np.int16)
-                for channel in range(image.shape[-1]):
-                    save_cube(
-                        image,
-                        cell.to_dict(),
-                        channel,
-                        cell_type_output_directory,
-                    )
+            i = 0
+            for images, cells in dataloader:
+                for image, cell in zip(images, cells):
+                    image = image.numpy().astype(np.int16)
+                    for channel in range(image.shape[-1]):
+                        save_cube(
+                            image,
+                            cell.to_dict(),
+                            channel,
+                            cell_type_output_directory,
+                        )
 
-                # Update progress bar
-                yield {"value": i + 1}
+                    # Update progress bar
+                    yield {"value": i + 1}
+                    i += 1
 
             self.update_status_label("Finished saving cubes")
 
