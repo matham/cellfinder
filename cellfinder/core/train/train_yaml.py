@@ -358,11 +358,9 @@ def get_dataloader(
     )
     data_loader = DataLoader(
         dataset=dataset,
-        sampler=sampler,
+        batch_sampler=sampler,
         num_workers=n_processes,
-        drop_last=False,
         pin_memory=pin_memory,
-        collate_fn=CuboidBatchSampler.loader_collate_identity,
     )
     return data_loader, dataset
 

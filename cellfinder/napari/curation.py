@@ -672,9 +672,8 @@ class CurationWidget(QWidget):
             )
             dataloader = DataLoader(
                 cube_generator,
-                sampler=sampler,
+                batch_sampler=sampler,
                 num_workers=0,
-                collate_fn=CuboidBatchSampler.loader_collate_identity,
             )
             # Set up progress bar
             yield {

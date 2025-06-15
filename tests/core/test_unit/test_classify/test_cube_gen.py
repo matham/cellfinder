@@ -631,11 +631,8 @@ def test_dataset_dataloader_sampler(unique_int, batch_size, batch_idx):
     )
     dataloader = DataLoader(
         dataset,
-        sampler=sampler,
-        shuffle=False,
+        batch_sampler=sampler,
         num_workers=0,
-        drop_last=False,
-        collate_fn=CuboidBatchSampler.loader_collate_identity,
     )
 
     batches = list(dataloader)

@@ -81,11 +81,9 @@ def main(
     )
     data_loader = DataLoader(
         dataset=dataset,
-        sampler=sampler,
+        batch_sampler=sampler,
         num_workers=workers,
-        drop_last=False,
         pin_memory=pin_memory,
-        collate_fn=CuboidBatchSampler.loader_collate_identity,
     )
 
     if trained_model and Path(trained_model).suffix == ".h5":

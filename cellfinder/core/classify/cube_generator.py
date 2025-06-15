@@ -1163,8 +1163,7 @@ class CuboidBatchSampler(Sampler):
         sampler = CuboidBatchSampler(dataset=dataset, ...)
         data_loader = torch.utils.data.DataLoader(
             dataset=dataset,
-            sampler=sampler,
-            collate_fn=CuboidBatchSampler.loader_collate_identity,
+            batch_sampler=sampler,
             ...
         )
 
@@ -1176,8 +1175,7 @@ class CuboidBatchSampler(Sampler):
 
     To get the batches values.
 
-    `loader_collate_identity` must be used as an argument to `collate_fn` when
-    used with a `DataLoader`. Similarly, `CuboidBatchSampler` is doing the
+    When used with a `DataLoader`, `CuboidBatchSampler` is doing the
     shuffling instead of the `DataLoader` itself so `batch_size` and `shuffle`
     shouldn't be used if you use this sampler.
 
@@ -1257,11 +1255,3 @@ class CuboidBatchSampler(Sampler):
 
     def __iter__(self):
         yield from self.get_batches(self.auto_shuffle)
-
-    @staticmethod
-    def loader_collate_identity(data):
-        """
-        Function that should be used as the `collate_fn` argument for
-        `torch.utils.data.DataLoader` so the sampler will work correctly.
-        """
-        return data[0]
