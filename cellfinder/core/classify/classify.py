@@ -37,7 +37,7 @@ def main(
     max_workers: int = 6,
     *,
     callback: Optional[Callable[[int], None]] = None,
-    normalize_channels: bool = True,
+    normalize_channels: bool = False,
     normalization_down_sampling: int = 32,
 ) -> List[Cell]:
     """
@@ -187,9 +187,10 @@ def main(
     k = 0
     for arr in sampler:
         for i in arr:
-            p = dataset.points_arr[i]
+            # it is in x, y, z order
+            point = dataset.points_arr[i].tolist()
             cell = Cell(
-                (p["x"], p["y"], p["z"]),
+                point,
                 cell_type=(predictions[k] + 1).item(),
             )
             points_list.append(cell)
