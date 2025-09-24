@@ -50,6 +50,7 @@ def main(
     detect_finished_callback: Optional[Callable[[list], None]] = None,
     normalize_channels: bool = False,
     normalization_down_sampling: int = 32,
+    detect_centre_of_intensity: bool = False,
 ) -> List[Cell]:
     """
     Parameters
@@ -190,6 +191,13 @@ def main(
         in the first axis by this value before calculating their statistics
         before classification. E.g. a value of 2 means every second plane will
         be used. Defaults to 32.
+    detect_centre_of_intensity : bool
+        If False, a candidate cell's center is just the mean of the positions
+        of all voxels marked as above background, or bright, in that candidate.
+        The voxel intensity is not taken into account. If True, the center is
+        calculated similar to the center of mass, but using the intensity. So
+        the center gets pulled towards the brighter voxels in the volume.
+        Defaults to False.
     """
     from cellfinder.core.classify import classify
     from cellfinder.core.detect import detect
@@ -222,6 +230,7 @@ def main(
             split_ball_xy_size=split_ball_xy_size,
             split_ball_overlap_fraction=split_ball_overlap_fraction,
             n_splitting_iter=n_splitting_iter,
+            detect_centre_of_intensity=detect_centre_of_intensity,
         )
 
         if detect_finished_callback is not None:
