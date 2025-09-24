@@ -56,6 +56,7 @@ def main(
     n_splitting_iter: int = 10,
     *,
     callback: Optional[Callable[[int], None]] = None,
+    detect_centre_of_intensity: bool = False,
 ) -> List[Cell]:
     """
     Perform cell candidate detection on a 3D signal array.
@@ -139,6 +140,12 @@ def main(
     callback : Callable[int], optional
         A callback function that is called every time a plane has finished
         being processed. Called with the plane number that has finished.
+    detect_centre_of_intensity : bool
+        If False, a candidate cell's center is just the mean of the positions
+        of all voxels marked as above background, or bright, in that candidate.
+        The voxel intensity is not taken into account. If True, the center is
+        calculated similar to the center of mass, but using the intensity. So
+        the center gets pulled towards the brighter voxels in the volume.
 
     Returns
     -------
@@ -201,6 +208,7 @@ def main(
         torch_device=torch_device,
         pin_memory=pin_memory,
         n_splitting_iter=n_splitting_iter,
+        detect_centre_of_intensity=detect_centre_of_intensity,
     )
 
     # replicate the settings specific to splitting, before we access anything

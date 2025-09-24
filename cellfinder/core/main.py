@@ -46,6 +46,7 @@ def main(
     detect_callback: Optional[Callable[[int], None]] = None,
     classify_callback: Optional[Callable[[int], None]] = None,
     detect_finished_callback: Optional[Callable[[list], None]] = None,
+    detect_centre_of_intensity: bool = False,
 ) -> List[Cell]:
     """
     Parameters
@@ -163,6 +164,13 @@ def main(
         Called with the batch number that has just finished.
     detect_finished_callback : Callable[list], optional
         Called after detection is finished with the list of detected points.
+    detect_centre_of_intensity : bool
+        If False, a candidate cell's center is just the mean of the positions
+        of all voxels marked as above background, or bright, in that candidate.
+        The voxel intensity is not taken into account. If True, the center is
+        calculated similar to the center of mass, but using the intensity. So
+        the center gets pulled towards the brighter voxels in the volume.
+        Defaults to False.
     """
     from cellfinder.core.classify import classify
     from cellfinder.core.detect import detect
@@ -193,6 +201,7 @@ def main(
             split_ball_xy_size=split_ball_xy_size,
             split_ball_overlap_fraction=split_ball_overlap_fraction,
             n_splitting_iter=n_splitting_iter,
+            detect_centre_of_intensity=detect_centre_of_intensity,
         )
 
         if detect_finished_callback is not None:

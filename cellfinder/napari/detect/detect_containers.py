@@ -72,6 +72,7 @@ class DetectionInputs(InputContainer):
     soma_spread_factor: float = 1.4
     max_cluster_size: float = 100000
     detection_batch_size: int = 1
+    detect_centre_of_intensity: bool = False
 
     def as_core_arguments(self) -> dict:
         return super().as_core_arguments()
@@ -96,6 +97,10 @@ class DetectionInputs(InputContainer):
             ),
             n_sds_above_mean_thresh=cls._custom_widget(
                 "n_sds_above_mean_thresh", custom_label="Threshold"
+            ),
+            detect_centre_of_intensity=cls._custom_widget(
+                "detect_centre_of_intensity",
+                custom_label="Use centre of intensity",
             ),
             soma_spread_factor=cls._custom_widget(
                 "soma_spread_factor", custom_label="Split cell spread"
