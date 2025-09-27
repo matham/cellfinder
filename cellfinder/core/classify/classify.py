@@ -81,7 +81,7 @@ def main(
     network_depth: str
         The network depth to use during classification. Defaults to `"50"`.
     max_workers: int
-        The number of sub-processes to use for data loading / processing.
+        The max number of sub-processes to use for data loading / processing.
         Defaults to 8.
     pin_memory: bool
         Pins data to be sent to the GPU to the CPU memory. This allows faster

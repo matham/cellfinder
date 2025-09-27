@@ -51,6 +51,7 @@ def main(
     normalize_channels: bool = False,
     normalization_down_sampling: int = 32,
     detect_centre_of_intensity: bool = False,
+    classification_max_workers: int = 6,
 ) -> List[Cell]:
     """
     Parameters
@@ -198,6 +199,9 @@ def main(
         calculated similar to the center of mass, but using the intensity. So
         the center gets pulled towards the brighter voxels in the volume.
         Defaults to False.
+    classification_max_workers : int
+        The max number of sub-processes to use for data loading / processing
+        during classification. Defaults to 6.
     """
     from cellfinder.core.classify import classify
     from cellfinder.core.detect import detect
@@ -263,6 +267,7 @@ def main(
                 callback=classify_callback,
                 normalize_channels=normalize_channels,
                 normalization_down_sampling=normalization_down_sampling,
+                max_workers=classification_max_workers,
             )
         else:
             logger.info("No candidates, skipping classification")
