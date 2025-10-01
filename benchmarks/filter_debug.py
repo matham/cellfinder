@@ -94,6 +94,8 @@ def setup_filter(
     n_splitting_iter: int = 10,
     start_plane: int = 0,
     end_plane: int = 0,
+    n_sds_above_mean_tiled_thresh: float = 10,
+    tiled_thresh_tile_size: float | None = None,
 ):
     signal_array = signal_path
     if not isinstance(signal_path, np.ndarray):
@@ -128,6 +130,8 @@ def setup_filter(
         torch_device=torch_device,
         n_splitting_iter=n_splitting_iter,
         detect_centre_of_intensity=detect_centre_of_intensity,
+        tiled_thresh_tile_size=tiled_thresh_tile_size,
+        n_sds_above_mean_tiled_thresh=n_sds_above_mean_tiled_thresh,
     )
 
     kwargs = dataclasses.asdict(settings)
@@ -145,9 +149,11 @@ def setup_filter(
         plane_shape=shape[1:],
         clipping_value=settings.clipping_value,
         threshold_value=settings.threshold_value,
+        n_sds_above_mean_thresh=settings.n_sds_above_mean_thresh,
+        n_sds_above_mean_tiled_thresh=settings.n_sds_above_mean_tiled_thresh,
+        tiled_thresh_tile_size=settings.tiled_thresh_tile_size,
         soma_diameter=settings.soma_diameter,
         log_sigma_size=settings.log_sigma_size,
-        n_sds_above_mean_thresh=settings.n_sds_above_mean_thresh,
         torch_device=torch_device,
         dtype=settings.filtering_dtype.__name__,
         use_scipy=use_scipy,
@@ -455,6 +461,8 @@ if __name__ == "__main__":
             split_ball_overlap_fraction=0.8,
             n_splitting_iter=10,
             batch_size=1,
+            n_sds_above_mean_tiled_thresh=1.25,
+            tiled_thresh_tile_size=5,
         )
         run_filter(
             Path(r"D:\tiffs\MF1_158F_W\debug\output_sig_thresh"), *filter_args
