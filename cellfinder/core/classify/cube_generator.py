@@ -1140,6 +1140,12 @@ class CuboidStackDataset(CuboidThreadedDatasetBase):
         This determines how many multiples (or fractions) of `n` such planes
         to buffer, in addition to `n` that is always buffered. So e.g. `1`
         means `2n` and `0.5` means `1.5n`. `1` is a good default.
+    :param signal_normalization: None or a 2-tuple of `(mean, std)`.
+        If not None, the signal channel in the cubes will be normalized to the
+        provided mean and standard deviation.
+    :param background_normalization: None or a 2-tuple of `(mean, std)`.
+        If not None, the background channel in the cubes will be normalized to
+        the provided mean and standard deviation.
     """
 
     def __init__(
@@ -1147,6 +1153,8 @@ class CuboidStackDataset(CuboidThreadedDatasetBase):
         signal_array: types.array,
         background_array: types.array | None,
         max_axis_0_cuboids_buffered: float = 0,
+        signal_normalization: None | tuple[float, float] = None,
+        background_normalization: None | tuple[float, float] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -1207,6 +1215,9 @@ class CuboidStackDataset(CuboidThreadedDatasetBase):
         )
         self._set_output_data_dim_reordering(self.src_image_data)
 
+        self.signal_normalization = signal_normalization
+        self.background_normalization = background_normalization
+
     def point_has_full_cuboid(self, point: Sequence[float]) -> bool:
         """
         Takes a 3d point and returns whether a cuboid centered on this point
@@ -1226,6 +1237,20 @@ class CuboidStackDataset(CuboidThreadedDatasetBase):
 
         return True
 
+    def get_points_data(self, points_key: Sequence[int]) -> torch.Tensor:
+        data = super().get_points_data(points_key)
+
+        if self.signal_normalization is not None:
+            mean, std = self.signal_normalization
+            data[..., 0] -= mean
+            data[..., 0] /= std
+        if self.background_normalization is not None:
+            mean, std = self.background_normalization
+            data[..., 1] -= mean
+            data[..., 1] /= std
+
+        return data
+
 
 class CuboidTiffDataset(CuboidThreadedDatasetBase):
     """
@@ -1238,6 +1263,12 @@ class CuboidTiffDataset(CuboidThreadedDatasetBase):
 
         The outer list is the number of points/samples. The inner lists is the
         number of channels (e.g. signal/background) for the given point.
+    :param points_normalization: None or a sequence of sequences of 2-tuples
+        of `(mean, std)`.
+
+        If not None, each 2-tuple corresponds to a single filename in
+        `points_filenames` and that cube will be normalized by the given
+        mean and standard deviation before returning it.
     :param max_cuboids_buffered: Integer
         The number of the most recently accessed cuboids to cache so it isn't
         read from disk again.
@@ -1246,6 +1277,9 @@ class CuboidTiffDataset(CuboidThreadedDatasetBase):
     def __init__(
         self,
         points_filenames: Sequence[Sequence[str]],
+        points_normalization: (
+            Sequence[Sequence[tuple[float, float]]] | None
+        ) = None,
         max_cuboids_buffered: int = 0,
         **kwargs,
     ):
@@ -1256,10 +1290,17 @@ class CuboidTiffDataset(CuboidThreadedDatasetBase):
             raise ValueError(
                 "Points and filenames must have same number of elements"
             )
+        if points_normalization is not None and len(points_filenames) != len(
+            points_normalization
+        ):
+            raise ValueError("Must have normalizations for all elements")
 
         self.num_channels = len(points_filenames[0])
         filenames_arr = np.array(points_filenames).astype(np.str_)
         self.filenames_arr = filenames_arr
+        self.points_norm_arr = None
+        if points_normalization is not None:
+            self.points_norm_arr = torch.tensor(points_normalization)
 
         self.src_image_data = CachedTiffCuboidImageData(
             points_arr=self.points_arr[:, :3],
@@ -1269,6 +1310,18 @@ class CuboidTiffDataset(CuboidThreadedDatasetBase):
             cuboid_size=self.data_cuboid_voxels,
         )
         self._set_output_data_dim_reordering(self.src_image_data)
+
+    def get_points_data(self, points_key: Sequence[int]) -> torch.Tensor:
+        data = super().get_points_data(points_key)
+
+        if self.points_norm_arr is not None:
+            norms = self.points_norm_arr[tuple(points_key), ...]
+            mean = norms[:, :, 0].unsqueeze(1).unsqueeze(1).unsqueeze(1)
+            std = norms[:, :, 1].unsqueeze(1).unsqueeze(1).unsqueeze(1)
+            data -= mean
+            data /= std
+
+        return data
 
 
 class CuboidBatchSampler(Sampler):
