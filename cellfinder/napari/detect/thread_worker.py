@@ -1,12 +1,15 @@
+import numpy as np
 from magicgui.widgets import ProgressBar
 from napari.qt.threading import WorkerBase, WorkerBaseSignals
 from qtpy.QtCore import Signal
 
+from cellfinder.core.detect.detect_debug import DetectionDebug
 from cellfinder.core.main import main as cellfinder_run
 
 from .detect_containers import (
     ClassificationInputs,
     DataInputs,
+    DebugInputs,
     DetectionInputs,
     MiscInputs,
 )
@@ -100,3 +103,71 @@ class Worker(WorkerBase):
         else:
             self.update_progress_bar.emit("Finished detection", 1, 1)
         return result
+
+
+class DebugWorker(Worker):
+
+    def __init__(self, *args, debug_inputs: DebugInputs, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.debug_inputs = debug_inputs
+
+    def work(self) -> DetectionDebug:
+        self.update_progress_bar.emit("Setting up detection...", 1, 0)
+        data = self.data_inputs
+        detect = self.detection_inputs
+        misc = self.misc_inputs
+        debug = self.debug_inputs
+
+        arr = data.signal_array
+        start = misc.start_plane
+        end = misc.end_plane
+        n = min(len(arr) if end <= 0 else end, len(arr)) - start
+
+        detect_debug = DetectionDebug(
+            signal_shape=(n, arr.shape[1], arr.shape[2]),
+            local_store=debug.debug_local_store,
+            batch_size=detect.detection_batch_size,
+            torch_device="cuda" if misc.use_gpu else "cpu",
+            dtype=np.uint16,
+            use_scipy=not misc.use_gpu,
+            voxel_sizes=(
+                data.voxel_size_z,
+                data.voxel_size_y,
+                data.voxel_size_x,
+            ),
+            soma_diameter=detect.soma_diameter,
+            max_cluster_size=detect.max_cluster_size,
+            ball_xy_size=detect.ball_xy_size,
+            ball_z_size=detect.ball_z_size,
+            ball_overlap_fraction=detect.ball_overlap_fraction,
+            soma_spread_factor=detect.soma_spread_factor,
+            n_free_cpus=misc.n_free_cpus,
+            log_sigma_size=detect.log_sigma_size,
+            n_sds_above_mean_thresh=detect.n_sds_above_mean_thresh,
+            detect_centre_of_intensity=detect.detect_centre_of_intensity,
+            split_ball_xy_size=detect.split_ball_xy_size,
+            split_ball_z_size=detect.split_ball_z_size,
+            split_ball_overlap_fraction=detect.split_ball_overlap_fraction,
+            n_splitting_iter=detect.n_splitting_iter,
+            n_sds_above_mean_tiled_thresh=detect.n_sds_above_mean_tiled_thresh,
+            tiled_thresh_tile_size=detect.tiled_thresh_tile_size,
+        )
+
+        def progress_callback(plane: int) -> None:
+            self.update_progress_bar.emit(
+                "Detecting cells",
+                n,
+                plane + 1,
+            )
+
+        detect_debug.run_filter(
+            start_from_stage=debug.debug_start_from,
+            end_on_stage=debug.debug_end_on,
+            signal=arr,
+            start_plane=start,
+            end_plane=end,
+            progress_callback=progress_callback,
+        )
+
+        self.update_progress_bar.emit("Finished detection", 1, 1)
+        return detect_debug

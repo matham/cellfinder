@@ -45,13 +45,13 @@ def add_classified_layers(
     unknown_name: str = "Rejected",
     cell_name: str = "Detected",
     scale: Optional[Tuple[float, float, float]] = None,
-) -> None:
+) -> tuple[napari.layers.Points, napari.layers.Points]:
     """
     Adds cell candidates as two separate point layers - unknowns and cells, to
     the napari viewer. Does not add any other cell types, only Cell.UNKNOWN
     and Cell.CELL from the list of cells.
     """
-    viewer.add_points(
+    layer_unk = viewer.add_points(
         cells_to_array(points, Cell.UNKNOWN, napari_order=True),
         name=unknown_name,
         size=15,
@@ -63,7 +63,7 @@ def add_classified_layers(
         metadata=dict(point_type=Cell.UNKNOWN),
         scale=scale,
     )
-    viewer.add_points(
+    layer_cells = viewer.add_points(
         cells_to_array(points, Cell.CELL, napari_order=True),
         name=cell_name,
         size=15,
@@ -74,6 +74,7 @@ def add_classified_layers(
         metadata=dict(point_type=Cell.CELL),
         scale=scale,
     )
+    return layer_cells, layer_unk
 
 
 def add_single_layer(
@@ -82,12 +83,12 @@ def add_single_layer(
     name: str,
     cell_type: int,
     scale: Optional[Tuple[float, float, float]] = None,
-) -> None:
+) -> napari.layers.Points:
     """
     Adds all cells of cell_type Cell.TYPE to a new point layer in the napari
     viewer, with given name.
     """
-    viewer.add_points(
+    layer = viewer.add_points(
         cells_to_array(points, cell_type, napari_order=True),
         name=name,
         size=15,
@@ -99,6 +100,7 @@ def add_single_layer(
         metadata=dict(point_type=cell_type),
         scale=scale,
     )
+    return layer
 
 
 def cells_to_array(
