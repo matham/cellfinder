@@ -6,6 +6,7 @@ import numpy
 import torch
 from brainglobe_utils.cells.cells import Cell
 
+from cellfinder.core.detect.detect_debug import DetectionStage
 from cellfinder.napari.input_container import InputContainer
 from cellfinder.napari.utils import html_label_widget
 
@@ -75,6 +76,10 @@ class DetectionInputs(InputContainer):
     max_cluster_size: float = 100000
     detection_batch_size: int = 1
     detect_centre_of_intensity: bool = False
+    split_ball_xy_size: float = 6
+    split_ball_z_size: float = 15
+    split_ball_overlap_fraction: float = 0.8
+    n_splitting_iter: int = 10
 
     def as_core_arguments(self) -> dict:
         return super().as_core_arguments()
@@ -122,6 +127,19 @@ class DetectionInputs(InputContainer):
             ),
             detection_batch_size=cls._custom_widget(
                 "detection_batch_size", custom_label="Batch size (detection)"
+            ),
+            split_ball_xy_size=cls._custom_widget(
+                "split_ball_xy_size", custom_label="Split ball filter (xy)"
+            ),
+            split_ball_z_size=cls._custom_widget(
+                "split_ball_z_size", custom_label="Split ball filter (z)"
+            ),
+            split_ball_overlap_fraction=cls._custom_widget(
+                "split_ball_overlap_fraction",
+                custom_label="Split ball overlap",
+            ),
+            n_splitting_iter=cls._custom_widget(
+                "n_splitting_iter", custom_label="Splitting iterations"
             ),
         )
 
@@ -178,13 +196,11 @@ class MiscInputs(InputContainer):
     analyse_local: bool = False
     use_gpu: bool = field(default_factory=lambda: torch.cuda.is_available())
     pin_memory: bool = False
-    debug: bool = False
 
     def as_core_arguments(self) -> dict:
         misc_input_dict = super().as_core_arguments()
         misc_input_dict["torch_device"] = "cuda" if self.use_gpu else "cpu"
         del misc_input_dict["use_gpu"]
-        del misc_input_dict["debug"]
         del misc_input_dict["analyse_local"]
         return misc_input_dict
 
@@ -209,5 +225,26 @@ class MiscInputs(InputContainer):
                 label="Pin data to memory",
                 value=cls.defaults()["pin_memory"],
             ),
+        )
+
+
+@dataclass
+class DebugInputs(InputContainer):
+    """Container for miscellaneous inputs."""
+
+    debug: bool = False
+    debug_start_from: DetectionStage = DetectionStage.input
+    debug_end_on: DetectionStage = DetectionStage.splitting
+    debug_local_store: Path = Path.home()
+
+    @classmethod
+    def widget_representation(cls) -> dict:
+        return dict(
+            debug_options=html_label_widget("Debug:"),
             debug=dict(value=cls.defaults()["debug"]),
+            debug_start_from=dict(value=cls.defaults()["debug_start_from"]),
+            debug_end_on=dict(value=cls.defaults()["debug_end_on"]),
+            debug_local_store=dict(
+                value=cls.defaults()["debug_local_store"], mode="d"
+            ),
         )

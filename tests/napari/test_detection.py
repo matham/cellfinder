@@ -53,6 +53,8 @@ def test_run_detect(get_detect_widget, analyse_local):
     """
     with patch("cellfinder.napari.detect.detect.Worker") as worker:
         get_detect_widget.analyse_local.value = analyse_local
+        # if debug, DebugWorker is called, so it should be False
+        get_detect_widget.debug.value = False
         get_detect_widget.call_button.clicked()
         assert worker.called
 

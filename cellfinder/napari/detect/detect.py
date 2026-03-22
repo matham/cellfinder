@@ -4,7 +4,9 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 import napari
 import napari.layers
-from brainglobe_utils.cells.cells import Cell
+from brainglobe_utils.cells.cells import Cell, MissingCellsError
+from brainglobe_utils.IO.cells import get_cells
+from brainglobe_utils.IO.image.load import read_z_stack
 from magicgui import magicgui
 from magicgui.widgets import FunctionGui, ProgressBar
 from napari.utils.notifications import show_info
@@ -14,6 +16,8 @@ from cellfinder.core.classify.cube_generator import (
     get_data_cuboid_range,
     get_data_cuboid_voxels,
 )
+from cellfinder.core.detect.detect_debug import DetectionDebug, DetectionStage
+from cellfinder.core.detect.filters.plane.tile_walker import TileWalker
 from cellfinder.napari.utils import (
     add_classified_layers,
     add_single_layer,
@@ -25,10 +29,11 @@ from cellfinder.napari.utils import (
 from .detect_containers import (
     ClassificationInputs,
     DataInputs,
+    DebugInputs,
     DetectionInputs,
     MiscInputs,
 )
-from .thread_worker import Worker
+from .thread_worker import DebugWorker, Worker
 
 NETWORK_VOXEL_SIZES = [5, 1, 1]
 CUBE_WIDTH = 50
@@ -143,6 +148,7 @@ def restore_options_defaults(widget: FunctionGui) -> None:
         **DetectionInputs.defaults(),
         **ClassificationInputs.defaults(),
         **MiscInputs.defaults(),
+        **DebugInputs.defaults(),
     }
     for name, value in defaults.items():
         if value is not None:  # ignore fields with no default
@@ -179,6 +185,123 @@ def get_results_callback(
             )
 
     return done_func
+
+
+def debug_results_callback(
+    viewer: napari.Viewer,
+    scale,
+    start_plane: int,
+    debug_start_from: DetectionStage,
+    debug_end_on: DetectionStage,
+    detect_debug: DetectionDebug,
+):
+    h, w = detect_debug.settings.plane_shape
+    tiler = TileWalker((h, w), detect_debug.settings.soma_diameter)
+    for tp, data_path, name, stage in [
+        (
+            "image",
+            detect_debug.input_image_path,
+            "Signal input",
+            DetectionStage.input,
+        ),
+        (
+            "image",
+            detect_debug.clipped_input_image_path,
+            "Clipped signal input",
+            DetectionStage.clipped,
+        ),
+        (
+            "image",
+            detect_debug.enhanced_image_path,
+            "Peak enhanced",
+            DetectionStage.enhanced,
+        ),
+        (
+            "labels",
+            detect_debug.inside_brain_image_path,
+            "Inside brain mask",
+            DetectionStage.filtered_2d,
+        ),
+        (
+            "image",
+            detect_debug.filtered_2d_image_path,
+            "Filtered 2D",
+            DetectionStage.filtered_2d,
+        ),
+        (
+            "image",
+            detect_debug.filtered_3d_image_path,
+            "Filtered 3D",
+            DetectionStage.filtered_3d,
+        ),
+        (
+            "labels",
+            detect_debug.structs_id_image_path,
+            "Detected structures ID",
+            DetectionStage.filtered_3d,
+        ),
+        (
+            "labels",
+            detect_debug.struct_type_image_path,
+            "Detected structures type",
+            DetectionStage.filtered_3d,
+        ),
+        (
+            "labels",
+            detect_debug.struct_type_split_image_path,
+            "Detected structures type after split",
+            DetectionStage.splitting,
+        ),
+    ]:
+        if not (debug_start_from <= stage <= debug_end_on):
+            continue
+
+        final_scale = scale
+        translate = (start_plane, 0, 0)
+        if name == "Inside brain mask":
+            sz, sy, sx = scale
+            final_scale = sz, sy * tiler.tile_height, sx * tiler.tile_width
+            # due to scaling we need to offset so it aligns. See napari #2778
+            translate = (
+                start_plane,
+                (final_scale[1] - scale[1]) / 2,
+                (final_scale[2] - scale[2]) / 2,
+            )
+
+        f = getattr(viewer, f"add_{tp}")
+        f(
+            read_z_stack(str(data_path)),
+            scale=final_scale,
+            translate=translate,
+            name=name,
+            visible=False,
+        )
+
+    if not (debug_start_from <= DetectionStage.splitting <= debug_end_on):
+        return
+
+    for xml_path, name in [
+        (detect_debug.initial_cell_candidates_path, "Initial cell candidates"),
+        (detect_debug.structs_needs_split_path, "Structs to be split"),
+        (detect_debug.structs_too_big_path, "Structs too big to split"),
+        (
+            detect_debug.struct_split_into_cell_candidate_path,
+            "Cell candidates from split",
+        ),
+    ]:
+        try:
+            cells = get_cells(xml_path)
+        except MissingCellsError:
+            cells = []
+
+        layer = add_single_layer(
+            cells,
+            viewer=viewer,
+            name=name,
+            cell_type=Cell.UNKNOWN,
+            scale=scale,
+        )
+        layer.visible = False
 
 
 def find_local_planes(
@@ -234,6 +357,7 @@ def detect_widget() -> FunctionGui:
         **DetectionInputs.widget_representation(),
         **ClassificationInputs.widget_representation(),
         **MiscInputs.widget_representation(),
+        **DebugInputs.widget_representation(),
         call_button=True,
         persist=True,
         reset_button=dict(widget_type="PushButton", text="Reset defaults"),
@@ -259,6 +383,10 @@ def detect_widget() -> FunctionGui:
         detect_centre_of_intensity: bool,
         soma_spread_factor: float,
         max_cluster_size: float,
+        split_ball_xy_size: float,
+        split_ball_z_size: float,
+        split_ball_overlap_fraction: float,
+        n_splitting_iter: int,
         classification_options,
         skip_classification: bool,
         use_pre_trained_weights: bool,
@@ -273,7 +401,11 @@ def detect_widget() -> FunctionGui:
         analyse_local: bool,
         use_gpu: bool,
         pin_memory: bool,
+        debug_options,
         debug: bool,
+        debug_start_from: DetectionStage,
+        debug_end_on: DetectionStage,
+        debug_local_store: Path,
         reset_button,
     ) -> None:
         """
@@ -441,6 +573,10 @@ def detect_widget() -> FunctionGui:
             max_cluster_size,
             detection_batch_size,
             detect_centre_of_intensity,
+            split_ball_xy_size,
+            split_ball_z_size,
+            split_ball_overlap_fraction,
+            n_splitting_iter,
         )
 
         if use_pre_trained_weights:
@@ -468,23 +604,55 @@ def detect_widget() -> FunctionGui:
             analyse_local,
             use_gpu,
             pin_memory,
+        )
+
+        debug_inputs = DebugInputs(
             debug,
+            debug_start_from,
+            debug_end_on,
+            debug_local_store,
         )
 
-        worker = Worker(
-            data_inputs,
-            detection_inputs,
-            classification_inputs,
-            misc_inputs,
-        )
+        if debug:
+            if not skip_classification:
+                show_info(
+                    "If debugging, please select to skip classification - "
+                    "only detection can be debugged"
+                )
+                return
 
-        worker.returned.connect(
-            get_results_callback(
-                skip_classification,
-                options["viewer"],
-                options["signal_image"].scale,
+            worker = DebugWorker(
+                data_inputs,
+                detection_inputs,
+                classification_inputs,
+                misc_inputs,
+                debug_inputs=debug_inputs,
             )
-        )
+            worker.returned.connect(
+                partial(
+                    debug_results_callback,
+                    options["viewer"],
+                    options["signal_image"].scale,
+                    start_plane,
+                    debug_start_from,
+                    debug_end_on,
+                )
+            )
+        else:
+            worker = Worker(
+                data_inputs,
+                detection_inputs,
+                classification_inputs,
+                misc_inputs,
+            )
+            worker.returned.connect(
+                get_results_callback(
+                    skip_classification,
+                    options["viewer"],
+                    options["signal_image"].scale,
+                )
+            )
+
         # Make sure if the worker emits an error, it is propagated to this
         # thread
         worker.errored.connect(reraise)
@@ -500,14 +668,14 @@ def detect_widget() -> FunctionGui:
     )
 
     # Insert progress bar before the run and reset buttons
-    widget.insert(widget.index("debug") + 1, progress_bar)
+    widget.insert(widget.index("reset_button") + 1, progress_bar)
 
     # add the signal and background image etc.
     add_heavy_widgets(
         widget,
         (background_image_opt, signal_image_opt, cell_layer_opt),
         ("Background image", "Signal image", "Candidate cell layer"),
-        ("voxel_size_z", "voxel_size_z", "soma_diameter"),
+        ("voxel_size_z", "voxel_size_z", "use_pre_trained_weights"),
     )
 
     scroll = QScrollArea()
