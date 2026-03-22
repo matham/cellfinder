@@ -4,7 +4,7 @@ import pickle
 from enum import IntEnum, auto
 from functools import cached_property
 from pathlib import Path
-from typing import Callable, Type
+from typing import Callable
 
 import numpy as np
 import tifffile
@@ -292,19 +292,9 @@ class DetectionDebug:
                 f"got {signal_array.shape}"
             )
 
-        signal_array = np.asarray(signal_array).astype(
-            self.settings.plane_original_np_dtype
-        )
-        signal_array = self.settings.filter_data_converter_func(signal_array)
-        signal_array_torch = torch.from_numpy(signal_array).to(
-            self.torch_device
-        )
+        return signal_array
 
-        return signal_array, signal_array_torch
-
-    def _read_image_from_local_store(
-        self, prefix: str, dtype: Type | None = None
-    ):
+    def _read_image_from_local_store(self, prefix: str):
         data = read_z_stack(str(self.local_store / prefix))
         if data.shape[0] != self.signal_shape[0]:
             raise ValueError(
@@ -312,7 +302,6 @@ class DetectionDebug:
                 f"got {data.shape[0]}"
             )
 
-        data = np.asarray(data, dtype=dtype)
         return data
 
     def _load_data(
@@ -323,51 +312,36 @@ class DetectionDebug:
         start_plane: int = 0,
         end_plane: int = 0,
     ):
-        filter_dtype = self.settings.filtering_dtype
-
         # we always need the input signal data for all stages. But we load from
         # input only if we start at input
-        self.signal_array_np = None
-        self.signal_array_torch = None
+        self.signal_array = None
         if start_from_stage == DetectionStage.input <= end_on_stage:
             if signal is None:
                 raise ValueError("Input data not provided")
-            sig = signal
+            self.signal_array = self._load_signal_data(
+                signal, start_plane, end_plane
+            )
         else:
-            sig = self._read_image_from_local_store("input")
-
-        signal_array_np, signal_array = self._load_signal_data(
-            sig, start_plane, end_plane
-        )
-        self.signal_array_np = signal_array_np
-        self.signal_array_torch = signal_array
+            self.signal_array = self._read_image_from_local_store("input")
 
         # we only use clipped data when doing enhancement filter. If starting
         # before enhancement we use the generated clipped data directly
         self.clipped_data = None
         if start_from_stage == DetectionStage.enhanced <= end_on_stage:
-            clipped_data = self._read_image_from_local_store(
-                "clipped", filter_dtype
-            )
-            clipped_data = torch.from_numpy(clipped_data).to(self.torch_device)
-            self.clipped_data = clipped_data
+            self.clipped_data = self._read_image_from_local_store("clipped")
 
         # we only use 2d filtered data when doing 3d filter. If starting
         # before 3d filtering we use the generated 2d data directly
         self.inside_data = None
         self.filtered_2d_data = None
         if start_from_stage == DetectionStage.filtered_3d <= end_on_stage:
-            inside_data = self._read_image_from_local_store(
-                "inside_brain", bool
+            self.inside_data = self._read_image_from_local_store(
+                "inside_brain"
             )
-            inside_data = torch.from_numpy(inside_data).to(self.torch_device)
-            self.inside_data = inside_data
 
-            filtered_2d = self._read_image_from_local_store(
-                "filtered_2d", filter_dtype
+            self.filtered_2d_data = self._read_image_from_local_store(
+                "filtered_2d"
             )
-            filtered_2d = torch.from_numpy(filtered_2d).to(self.torch_device)
-            self.filtered_2d_data = filtered_2d
 
         # if starting from before splitting, we generate the cell data anew
         if start_from_stage == DetectionStage.splitting <= end_on_stage:
@@ -383,11 +357,14 @@ class DetectionDebug:
     ):
         batch_size = self.batch_size
 
-        batch_torch = self.signal_array_torch[i : i + batch_size]
-        batch_np = self.signal_array_np[i : i + batch_size]
+        batch_np = np.asarray(self.signal_array[i : i + batch_size]).astype(
+            self.settings.plane_original_np_dtype
+        )
+        batch_np = self.settings.filter_data_converter_func(batch_np)
+        batch_torch = torch.from_numpy(batch_np).to(self.torch_device)
 
         if start_from_stage <= DetectionStage.input <= end_on_stage:
-            self.save_tiffs("input", i, batch_torch)
+            self.save_tiffs("input", i, batch_np)
 
         return batch_torch, batch_np
 
@@ -404,6 +381,12 @@ class DetectionDebug:
             self.save_tiffs("clipped", i, batch_clipped)
         elif start_from_stage == DetectionStage.enhanced <= end_on_stage:
             batch_clipped = self.clipped_data[i : i + self.batch_size]
+            batch_clipped = np.asarray(
+                batch_clipped, dtype=self.settings.filtering_dtype
+            )
+            batch_clipped = torch.from_numpy(batch_clipped).to(
+                self.torch_device
+            )
         else:
             batch_clipped = None
 
@@ -437,7 +420,16 @@ class DetectionDebug:
             self.save_tiffs("filtered_2d", i, filtered_2d)
         elif start_from_stage == DetectionStage.filtered_3d <= end_on_stage:
             inside_brain_tiles = self.inside_data[i : i + self.batch_size]
+            inside_brain_tiles = np.asarray(inside_brain_tiles, dtype=bool)
+            inside_brain_tiles = torch.from_numpy(inside_brain_tiles).to(
+                self.torch_device
+            )
+
             filtered_2d = self.filtered_2d_data[i : i + self.batch_size]
+            filtered_2d = np.asarray(
+                filtered_2d, dtype=self.settings.filtering_dtype
+            )
+            filtered_2d = torch.from_numpy(filtered_2d).to(self.torch_device)
         else:
             filtered_2d = None
             inside_brain_tiles = None
@@ -525,7 +517,10 @@ class DetectionDebug:
             "struct_split_into_cell_candidate": [],
         }
         s_intensities = cell_detector.get_structures_intensities()
-        for cell_id, arr in cell_detector.get_structures().items():
+        n = cell_detector.n_structures
+        for cell_id, arr in tqdm.tqdm(
+            cell_detector.get_structures().items(), total=n, unit="structures"
+        ):
             structs_pkl.append((cell_id, arr, s_intensities[cell_id]))
 
             intensity = None
@@ -555,7 +550,7 @@ class DetectionDebug:
             )
             struct_type_vol[arr[:, 2], arr[:, 1], arr[:, 0]] = color
 
-            if tp == "needs_split":
+            if tp == "struct_needs_split":
                 metadata["struct_type"] = "struct_split_cell_candidate"
 
                 centers, detector = split_cells(
@@ -631,7 +626,9 @@ class DetectionDebug:
         n_3d_planes = 0
         middle_planes = None
 
-        for i in tqdm.tqdm(range(0, self.signal_shape[0], self.batch_size)):
+        for i in tqdm.tqdm(
+            range(0, self.signal_shape[0], self.batch_size), unit="planes"
+        ):
             batch_torch, batch_np = self.batch_input(
                 i, start_from_stage, end_on_stage
             )
