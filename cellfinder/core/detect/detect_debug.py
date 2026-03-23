@@ -1,8 +1,9 @@
 import dataclasses
 import math
+import multiprocessing as mp
 import pickle
 from enum import IntEnum, auto
-from functools import cached_property
+from functools import cached_property, partial
 from pathlib import Path
 from typing import Callable
 
@@ -22,8 +23,10 @@ from cellfinder.core.detect.filters.volume.structure_detection import (
     get_structure_centre,
 )
 from cellfinder.core.detect.filters.volume.structure_splitting import (
+    StructureSplitException,
     split_cells,
 )
+from cellfinder.core.tools.tools import inference_wrapper
 
 
 class DetectionStage(IntEnum):
@@ -488,6 +491,49 @@ class DetectionDebug:
 
         return n_3d_planes, previous_plane, middle_planes
 
+    def split_structs(self, structs_to_split, volume: np.ndarray, color: int):
+        next_sid = self.cell_detector.next_structure_id
+        metadata = {
+            "struct_size": 0,
+            "struct_id": 0,
+            "struct_type": "struct_split_cell_candidate",
+        }
+        cells = []
+
+        progress_bar = tqdm.tqdm(
+            total=len(structs_to_split), desc="Splitting cell clusters"
+        )
+
+        f = partial(_split_cells, settings=self.splitting_settings)
+        ctx = mp.get_context("spawn")
+        # we can't use the context manager because of coverage issues:
+        # https://pytest-cov.readthedocs.io/en/latest/subprocess-support.html
+        pool = ctx.Pool(processes=self.settings.n_processes)
+        try:
+            for structures, did_split in pool.imap_unordered(
+                f, structs_to_split
+            ):
+                for cid, (centre, arr) in structures.items():
+                    metadata["struct_size"] = len(arr)
+                    if did_split:
+                        metadata["struct_id"] = next_sid
+                        next_sid += 1
+                    else:
+                        assert len(structures) == 1
+                        metadata["struct_id"] = cid
+
+                    volume[arr[:, 2], arr[:, 1], arr[:, 0]] = color
+                    cells.append(Cell(centre, Cell.UNKNOWN, metadata=metadata))
+
+                progress_bar.update()
+        finally:
+            pool.close()
+            pool.join()
+
+        progress_bar.close()
+
+        return cells
+
     def process_structures(
         self,
         start_from_stage: DetectionStage,
@@ -503,7 +549,6 @@ class DetectionDebug:
         max_split_size = self.settings.max_cluster_size
         detect_coi = self.settings.detect_centre_of_intensity
         cell_detector = self.cell_detector
-        next_sid = cell_detector.next_structure_id
         structs_pkl = []
 
         shape = self.signal_shape
@@ -516,6 +561,8 @@ class DetectionDebug:
             "struct_too_big": [],
             "struct_split_into_cell_candidate": [],
         }
+        structs_to_split = []
+
         s_intensities = cell_detector.get_structures_intensities()
         n = cell_detector.n_structures
         for cell_id, arr in tqdm.tqdm(
@@ -551,50 +598,13 @@ class DetectionDebug:
             struct_type_vol[arr[:, 2], arr[:, 1], arr[:, 0]] = color
 
             if tp == "struct_needs_split":
-                metadata["struct_type"] = "struct_split_cell_candidate"
-
-                centers, detector = split_cells(
-                    arr, self.splitting_settings, intensity
-                )
-                if detector is None:
-                    struct_type_split_vol[arr[:, 2], arr[:, 1], arr[:, 0]] = (
-                        color
-                    )
-                    cells["struct_split_into_cell_candidate"].append(
-                        Cell((cx, cy, cz), Cell.UNKNOWN, metadata=metadata)
-                    )
-                else:
-                    cell_detector_split, offset = detector
-
-                    s_intensities_split = (
-                        cell_detector_split.get_structures_intensities()
-                    )
-                    for (
-                        cell_id_split,
-                        arr_split,
-                    ) in cell_detector_split.get_structures().items():
-                        struct_type_split_vol[
-                            arr_split[:, 2], arr_split[:, 1], arr_split[:, 0]
-                        ] = color
-
-                        intensity_split = None
-                        if detect_coi:
-                            intensity_split = s_intensities_split[
-                                cell_id_split
-                            ]
-
-                        cx, cy, cz = get_structure_centre(
-                            arr_split, intensity_split
-                        )
-
-                        metadata["struct_size"] = len(arr_split)
-                        metadata["struct_id"] = next_sid
-                        next_sid += 1
-                        cells["struct_split_into_cell_candidate"].append(
-                            Cell((cx, cy, cz), Cell.UNKNOWN, metadata=metadata)
-                        )
+                structs_to_split.append((cell_id, arr, intensity))
             else:
                 struct_type_split_vol[arr[:, 2], arr[:, 1], arr[:, 0]] = color
+
+        cells["struct_split_into_cell_candidate"] = self.split_structs(
+            structs_to_split, struct_type_split_vol, 2
+        )
 
         with open(self.structures_data_path, "wb") as fh:
             pickle.dump(structs_pkl, fh, pickle.HIGHEST_PROTOCOL)
@@ -662,6 +672,42 @@ class DetectionDebug:
             )
 
         self.process_structures(start_from_stage, end_on_stage)
+
+
+@inference_wrapper
+def _split_cells(arg, settings: DetectionSettings):
+    # runs in its own process for a bright region to be split.
+    # For splitting cells, we only run with one thread. Because the volume is
+    # likely small and using multiple threads would cost more in overhead than
+    # is worth. num threads can be set only at processes level.
+    torch.set_num_threads(1)
+    cell_id, cell_points, intensity = arg
+    try:
+        centers, detector = split_cells(
+            cell_points, settings=settings, intensity=intensity
+        )
+        if detector is None:
+            return {cell_id: (centers[0, :], cell_points)}, False
+
+        structures = {}
+        cell_detector_split, offset = detector
+        s_intensities_split = cell_detector_split.get_structures_intensities()
+        for (
+            cell_id_split,
+            arr_split,
+        ) in cell_detector_split.get_structures().items():
+            arr_split += offset[None, :]
+
+            intensity_split = None
+            if settings.detect_centre_of_intensity:
+                intensity_split = s_intensities_split[cell_id_split]
+
+            center_split = get_structure_centre(arr_split, intensity_split)
+            structures[cell_id_split] = center_split, arr_split
+
+        return structures, True
+    except (ValueError, AssertionError) as err:
+        raise StructureSplitException(f"Cell {cell_id}, error; {err}")
 
 
 if __name__ == "__main__":
