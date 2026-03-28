@@ -202,32 +202,6 @@ class BallFilter:
         )
 
     @property
-    def first_valid_plane(self) -> int:
-        """
-        The index in `self.volume` (or the planes passed in) that will be the
-        first plane returned from `get_processed_planes`.
-
-        E.g. if `ball_z_size` is 3, then this may return 1. Meaning the second
-        plane passed to `append` (index 1), will be the first returned plane
-        by `get_processed_planes`.
-        """
-        return int(math.floor(self.ball_z_size / 2))
-
-    @property
-    def remaining_planes(self) -> int:
-        """
-        The number of planes in `self.volume` (or the planes passed in) that
-        will remain unprocessed after all the planes have been `walk`ed
-        and `get_processed_planes` called.
-
-        E.g. if `ball_z_size` is 3, then this may return 1. Meaning the last
-        plane passed to `append`, will never be returned by
-        `get_processed_planes` because the filter "center" never overlapped
-        with it.
-        """
-        return self.ball_z_size - self.first_valid_plane - 1
-
-    @property
     def ready(self) -> bool:
         """
         Return whether enough planes have been appended to run the filter
@@ -285,10 +259,61 @@ class BallFilter:
                     ],
                     dim=0,
                 )
+        elif self.middle_z_idx > 0:
+            # need to pad the start before middle plane
+            pad = self.middle_z_idx
+
+            pad_planes = torch.zeros(
+                (pad, planes.shape[1], planes.shape[2]),
+                dtype=planes.dtype,
+                device=planes.device,
+            )
+            self.volume = torch.cat(
+                [pad_planes, planes],
+                dim=0,
+            )
+
+            if self.inside_brain_tiles is not None:
+                pad_inside = torch.zeros(
+                    (pad, masks.shape[1], masks.shape[2]),
+                    dtype=masks.dtype,
+                    device=masks.device,
+                )
+                self.inside_brain_tiles = torch.cat([pad_inside, masks], dim=0)
         else:
             self.volume = planes.clone()
             if self.inside_brain_tiles is not None:
                 self.inside_brain_tiles = masks.clone()
+
+    def flush(self) -> bool:
+        """
+        Ensure to get unprocessed planes, because this calls append.
+        """
+        # we need this many at end to process last plane
+        pad = self.ball_z_size - self.middle_z_idx - 1
+
+        if not self.volume.shape[0] or not pad:
+            return False
+
+        vol = self.volume
+        inside = self.inside_brain_tiles
+
+        pad_planes = torch.zeros(
+            (pad, vol.shape[1], vol.shape[2]),
+            dtype=vol.dtype,
+            device=vol.device,
+        )
+        pad_inside = None
+        if inside is not None:
+            pad_inside = torch.zeros(
+                (pad, inside.shape[1], inside.shape[2]),
+                dtype=inside.dtype,
+                device=inside.device,
+            )
+
+        self.append(pad_planes, pad_inside)
+
+        return True
 
     def get_processed_planes(self) -> np.ndarray:
         """

@@ -113,17 +113,24 @@ def ball_filter_imgs(
     except InvalidVolume:
         return np.empty((0, 3))
 
-    start_z = bf.first_valid_plane
+    start_z = 0
     cell_detector = CellDetector(
         settings.plane_height,
         settings.plane_width,
-        start_z=start_z,
+        start_z=0,
         soma_centre_value=settings.detection_soma_centre_value,
     )
 
     previous_plane = None
-    for z in range(0, volume.shape[0], batch_size):
-        bf.append(volume[z : z + batch_size, :, :])
+    batch_start = list(range(0, volume.shape[0], batch_size)) + [None]
+    for z in batch_start:
+        # after last batch, flush remaining planes and process if needed
+        if z is None:
+            if not bf.flush():
+                # nothing to process, finish loop
+                break
+        else:
+            bf.append(volume[z : z + batch_size, :, :])
 
         if bf.ready:
             bf.walk()

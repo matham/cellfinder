@@ -165,11 +165,7 @@ def test_callbacks(signal_array, background_array, no_free_cpus):
         ball_z_size=15,
     )
 
-    skipped_planes = int(round(15 / voxel_sizes[0])) - 1
-    skip_start = skipped_planes // 2
-    skip_end = skipped_planes - skip_start
-    n = len(signal_array) - skip_end
-    np.testing.assert_equal(planes_done, np.arange(skip_start, n))
+    np.testing.assert_equal(planes_done, np.arange(len(signal_array)))
     np.testing.assert_equal(batches_classified, [0])
 
     ncalls = len(points_found)

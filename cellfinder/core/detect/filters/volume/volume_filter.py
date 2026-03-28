@@ -28,6 +28,8 @@ from cellfinder.core.tools.threading import (
 )
 from cellfinder.core.tools.tools import inference_wrapper
 
+_done_signal = "is_done"
+
 
 @inference_wrapper
 def _plane_filter(
@@ -98,7 +100,7 @@ class VolumeFilter:
             use_mask=True,
         )
 
-        self.z = settings.start_plane + self.ball_filter.first_valid_plane
+        self.z = settings.start_plane
 
         self.cell_detector = CellDetector(
             settings.plane_height,
@@ -218,9 +220,12 @@ class VolumeFilter:
             if n < batch_size:
                 # on last batch, we are also done after this
                 thread.send_msg_to_mainthread(msg)
+                thread.send_msg_to_mainthread(_done_signal)
                 return
             # send the data to the main thread
             thread.send_msg_to_mainthread(msg)
+
+        thread.send_msg_to_mainthread(_done_signal)
 
     def process(
         self,
@@ -323,27 +328,38 @@ class VolumeFilter:
             # eof, this will block until we get more loaded data until no more
             # data or exception
             msg = feed_thread.get_msg_from_thread()
-            # feeder thread exits at the end, causing a eof to be sent
+            # feeder thread exits at the end, causing an eof to be sent
             if msg is EOFSignal:
                 break
-            token, tensor, masks, used_processors, n = msg
-            # this token is in use until we return it
-            processing_tokens.append(token)
 
-            if cpu:
-                # we did 2d filtering in different process. Make sure all the
-                # planes are done filtering. Each msg from feeder thread has
-                # corresponding msg for each used processor (unless exception)
-                for process in used_processors:
-                    process.get_msg_from_thread()
-                # batch size can change at the end so resize buffer
-                planes = tensor[:n, :, :]
-                masks = masks[:n, :, :]
+            # if feeder thread said no more data, flush to process last planes
+            if msg == _done_signal:
+                # if flush resulted in more data, process it. Next iteration
+                # should give us an EOFSignal from feeder. Otherwise if no new
+                # data, just exit now instead of waiting for EOFSignal
+                if not self.ball_filter.flush():
+                    break
             else:
-                # we're not doing 2d filtering in different process
-                planes, masks = tile_processor.get_tile_mask(tensor)
+                token, tensor, masks, used_processors, n = msg
+                # this token is in use until we return it
+                processing_tokens.append(token)
 
-            self.ball_filter.append(planes, masks)
+                if cpu:
+                    # we did 2d filtering in different process. Make sure all
+                    # the planes are done filtering. Each msg from feeder
+                    # thread has corresponding msg for each used processor
+                    # (unless exception)
+                    for process in used_processors:
+                        process.get_msg_from_thread()
+                    # batch size can change at the end so resize buffer
+                    planes = tensor[:n, :, :]
+                    masks = masks[:n, :, :]
+                else:
+                    # we're not doing 2d filtering in different process
+                    planes, masks = tile_processor.get_tile_mask(tensor)
+
+                self.ball_filter.append(planes, masks)
+
             if self.ball_filter.ready:
                 self.ball_filter.walk()
                 middle_planes = self.ball_filter.get_processed_planes()
@@ -379,11 +395,6 @@ class VolumeFilter:
         detection_converter = self.settings.detection_data_converter_func
         save_planes = self.settings.save_planes
         previous_plane = None
-        bf = self.ball_filter
-
-        # these many planes are not processed at start because 3d filter uses
-        # it as padding at the start of filter
-        progress_bar.update(bf.first_valid_plane)
 
         # main thread needs a token to send us planes - populate with some
         for _ in range(self.n_queue_buffer):
@@ -396,9 +407,6 @@ class VolumeFilter:
             # requested that we return. This can mean the main thread finished
             # sending data and it appended eof - so we get eof after all planes
             if msg is EOFSignal:
-                # these many planes are not processed at the end because 3d
-                # filter uses it as padding at the end of the filter
-                progress_bar.update(bf.remaining_planes)
                 return
 
             # convert plane to the type needed by detection system
