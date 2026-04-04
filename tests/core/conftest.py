@@ -170,6 +170,31 @@ def synthetic_single_spot() -> (
 
 
 @pytest.fixture(scope="session")
+def synthetic_single_spot_large() -> (
+    Tuple[np.ndarray, np.ndarray, Tuple[int, int, int]]
+):
+    """
+    Creates a synthetic signal array with a single spherical spot
+    in a 3d numpy array to be used for cell detection testing.
+
+    The max value is 100 and min is zero. The array is a floating type.
+    You must convert it to the right data type for your tests.
+    Also, `n_sds_above_mean_thresh` must be 1 or larger.
+    """
+    shape_zyx = 20, 50, 50
+    c_xyz = 25, 25, 10
+
+    signal_array = np.zeros(shape_zyx)
+    background_array = np.zeros_like(signal_array)
+    mark_sphere(signal_array, center_xyz=c_xyz, radius=7, fill_value=100)
+
+    # 1 std should be larger, so it can be considered bright
+    assert np.mean(signal_array) + np.std(signal_array) > 1
+
+    return signal_array, background_array, c_xyz
+
+
+@pytest.fixture(scope="session")
 def synthetic_spot_clusters() -> (
     Tuple[np.ndarray, np.ndarray, List[Tuple[int, int, int]]]
 ):

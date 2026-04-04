@@ -72,7 +72,7 @@ def test_2d_filter_cell_detection_thread_exception(mocker: MockerFixture):
     )
 
     mocker.patch.object(
-        VolumeFilter, "_run_filter_thread", new=raise_exception
+        VolumeFilter, "_run_cell_detection_thread", new=raise_exception
     )
     run_main_assert_exception()
 
