@@ -68,7 +68,11 @@ def test_data_registry():
 
 
 def mark_sphere(
-    data_zyx: np.ndarray, center_xyz, radius: int, fill_value: int
+    data_zyx: np.ndarray,
+    center_xyz,
+    radius: int,
+    fill_value: int,
+    dropoff: bool = False,
 ) -> None:
     shape_zyx = data_zyx.shape
 
@@ -80,8 +84,12 @@ def mark_sphere(
         + (y - center_xyz[1]) ** 2
         + (z - center_xyz[2]) ** 2
     )
-    # 100 seems to be the right size so std is not too small for filters
-    data_zyx[dist <= radius] = fill_value
+
+    inside = dist <= radius
+    if dropoff:
+        data_zyx[inside] = ((radius - dist[inside]) / radius) ** 2 * fill_value
+    else:
+        data_zyx[inside] = fill_value
 
 
 @pytest.fixture(scope="session")
@@ -187,6 +195,34 @@ def synthetic_single_spot_large() -> (
     signal_array = np.zeros(shape_zyx)
     background_array = np.zeros_like(signal_array)
     mark_sphere(signal_array, center_xyz=c_xyz, radius=7, fill_value=100)
+
+    # 1 std should be larger, so it can be considered bright
+    assert np.mean(signal_array) + np.std(signal_array) > 1
+
+    return signal_array, background_array, c_xyz
+
+
+@pytest.fixture(scope="session")
+def synthetic_single_spot_smooth() -> (
+    Tuple[np.ndarray, np.ndarray, Tuple[int, int, int]]
+):
+    """
+    Creates a synthetic signal array with a single spherical spot dropping off
+    in intensity from the center, in a 3d numpy array to be used for cell
+    detection testing.
+
+    The max value is 100 and drops off to zero at the radius. The array is a
+    floating type. You must convert it to the right data type for your tests.
+    Also, `n_sds_above_mean_thresh` must be 1 or larger.
+    """
+    shape_zyx = 50, 50, 50
+    c_xyz = 25, 25, 25
+
+    signal_array = np.zeros(shape_zyx)
+    background_array = np.zeros_like(signal_array)
+    mark_sphere(
+        signal_array, center_xyz=c_xyz, radius=6, fill_value=100, dropoff=True
+    )
 
     # 1 std should be larger, so it can be considered bright
     assert np.mean(signal_array) + np.std(signal_array) > 1

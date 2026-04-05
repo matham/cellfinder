@@ -332,3 +332,28 @@ def test_detection_plane_too_small(synthetic_spot_clusters, y, x):
             voxel_sizes=(1, 1, 1),
             ball_xy_size=50,
         )
+
+
+@pytest.mark.parametrize("tile_threshold,tile_size", [(0, 2), (1, 2), (1, 4)])
+def test_threshold_tiling(
+    synthetic_single_spot_smooth, tile_threshold, tile_size
+):
+    signal, _, c_xyz = synthetic_single_spot_smooth
+    detected = detect_main(
+        signal.astype(np.uint16),
+        voxel_sizes=(1, 1, 1),
+        soma_diameter=8,
+        ball_xy_size=1,
+        ball_z_size=1,
+        log_sigma_size=0.2,
+        ball_overlap_fraction=0.6,
+        n_sds_above_mean_thresh=0.5,
+        soma_spread_factor=5,
+        n_sds_above_mean_tiled_thresh=tile_threshold,
+        tiled_thresh_tile_size=tile_size,
+    )
+
+    assert len(detected) == 1
+    (cell,) = detected
+    for actual, expected in zip((cell.x, cell.y, cell.z), c_xyz):
+        assert abs(actual - expected) <= 1

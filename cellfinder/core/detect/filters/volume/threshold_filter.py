@@ -80,6 +80,40 @@ class ThresholdFilter3D:
         """
         return self.volume.shape[0] >= self.tile_z_size
 
+    def _append_to_volume(self, data_planes: torch.Tensor) -> int:
+        """
+        Append new data to volume and remove previously processed volume data.
+        """
+        remaining_start = 0
+        if self.volume.shape[0]:
+            if self.volume.shape[0] < self.tile_z_size:
+                num_remaining_with_padding = self.volume.shape[0]
+            else:
+                num_remaining = self.tile_z_size - (self.middle_z_idx + 1)
+                num_remaining_with_padding = num_remaining + self.middle_z_idx
+            remaining_start = self.volume.shape[0] - num_remaining_with_padding
+
+            self.volume = torch.cat(
+                [self.volume[remaining_start:, :, :], data_planes],
+                dim=0,
+            )
+        elif self.middle_z_idx > 0:
+            # need to pad the start before middle plane
+            self.volume = torch.cat(
+                [
+                    data_planes[:1],
+                ]
+                * self.middle_z_idx
+                + [
+                    data_planes,
+                ],
+                dim=0,
+            )
+        else:
+            self.volume = data_planes.clone()
+
+        return remaining_start
+
     def append(
         self,
         data_planes: torch.Tensor,
@@ -116,33 +150,7 @@ class ThresholdFilter3D:
                 "Side data must have same number of planes as data"
             )
 
-        remaining_start = 0
-        if self.volume.shape[0]:
-            if self.volume.shape[0] < self.tile_z_size:
-                num_remaining_with_padding = self.volume.shape[0]
-            else:
-                num_remaining = self.tile_z_size - (self.middle_z_idx + 1)
-                num_remaining_with_padding = num_remaining + self.middle_z_idx
-            remaining_start = self.volume.shape[0] - num_remaining_with_padding
-
-            self.volume = torch.cat(
-                [self.volume[remaining_start:, :, :], data_planes],
-                dim=0,
-            )
-        elif self.middle_z_idx > 0:
-            # need to pad the start before middle plane
-            self.volume = torch.cat(
-                [
-                    data_planes[:1],
-                ]
-                * self.middle_z_idx
-                + [
-                    data_planes,
-                ],
-                dim=0,
-            )
-        else:
-            self.volume = data_planes.clone()
+        remaining_start = self._append_to_volume(data_planes)
 
         if remaining_start:
             del self.marked_planes[:remaining_start]
@@ -173,15 +181,8 @@ class ThresholdFilter3D:
             * pad,
             dim=0,
         )
+        self._append_to_volume(data)
 
-        last_marked = self.marked_planes[-1]
-        marked = torch.zeros(
-            (pad, *last_marked.shape),
-            dtype=last_marked.dtype,
-            device=last_marked.device,
-        )
-
-        self.append(data, marked, side_data=None)
         return True
 
     def get_processed_planes(
@@ -226,6 +227,7 @@ class ThresholdFilter3D:
             self.volume,
             self.tile_xy_size,
             self.tile_z_size,
+            self.middle_z_idx,
             self.n_sds_above_mean_thresh,
             self.threshold_value,
         )
@@ -237,6 +239,7 @@ def _threshold_volume(
     data_planes: torch.Tensor,
     tile_xy_size: int,
     tile_z_size: int,
+    middle_z_idx: int,
     n_sds_above_mean_thresh: float,
     threshold_value: int,
 ) -> None:
@@ -263,6 +266,17 @@ def _threshold_volume(
     # we want at least one axis to have at least two tiles
     if tile_xy_size < 2 or (not do_tile_y) and (not do_tile_x):
         return
+
+    # in 2d filters each plane is independently normalized so absolute values
+    # mean nothing between planes. By normalizing to mean/std, assuming
+    # neighboring planes have somewhat similar stats, we can now tile across
+    # planes and use the same threshold across neighboring planes
+    std, mean = torch.std_mean(data_planes, dim=(1, 2), keepdim=True)
+    # don't edit in place since same plane may be "walked" in multiple calls
+    data_planes = data_planes - mean
+    # if min = max = zero, divide by 1 - it'll stay zero
+    std[std == 0] = 1
+    data_planes.div_(std)
 
     # num edge pixels dropped b/c moving by stride would move tile off edge
     y_rem = y % stride_xy
@@ -330,7 +344,7 @@ def _threshold_volume(
         plane = marked_planes[i]
         above = torch.logical_and(
             plane == threshold_value,
-            data_planes_raw[i, :, :] > threshold,
+            data_planes_raw[middle_z_idx + i, :, :] > threshold,
         )
 
         t = torch.tensor(

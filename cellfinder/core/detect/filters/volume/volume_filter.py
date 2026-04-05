@@ -412,7 +412,7 @@ class VolumeFilter:
             )
             if tf is not None:
                 # pass through tf if using
-                tf.append(planes, enhanced, masks)
+                tf.append(enhanced, planes, masks)
                 if not tf.ready:
                     # wait for more data before we can use any tf results
                     continue
