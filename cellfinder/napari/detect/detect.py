@@ -4,6 +4,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 import napari
 import napari.layers
+import numpy as np
 from brainglobe_utils.cells.cells import Cell, MissingCellsError
 from brainglobe_utils.IO.cells import get_cells
 from brainglobe_utils.IO.image.load import read_z_stack
@@ -17,7 +18,6 @@ from cellfinder.core.classify.cube_generator import (
     get_data_cuboid_voxels,
 )
 from cellfinder.core.detect.detect_debug import DetectionDebug, DetectionStage
-from cellfinder.core.detect.filters.plane.tile_walker import TileWalker
 from cellfinder.napari.utils import (
     add_classified_layers,
     add_single_layer,
@@ -191,109 +191,137 @@ def debug_results_callback(
     viewer: napari.Viewer,
     scale,
     start_plane: int,
-    debug_start_from: DetectionStage,
-    debug_end_on: DetectionStage,
+    bottom_corner: tuple[int, int],
+    start_gen_from: DetectionStage,
+    end_gen_on: DetectionStage,
     detect_debug: DetectionDebug,
 ):
-    h, w = detect_debug.settings.plane_shape
-    tiler = TileWalker((h, w), detect_debug.settings.soma_diameter)
-    for tp, data_path, name, stage in [
+    tiler = detect_debug.tile_processor.tile_walker
+    for tp, data_path, name, stage, dtype in [
         (
             "image",
             detect_debug.input_image_path,
             "Signal input",
             DetectionStage.input,
+            None,
         ),
         (
             "image",
             detect_debug.clipped_input_image_path,
             "Clipped signal input",
             DetectionStage.clipped,
+            None,
         ),
         (
             "image",
             detect_debug.enhanced_image_path,
             "Peak enhanced",
             DetectionStage.enhanced,
+            None,
         ),
         (
             "labels",
             detect_debug.inside_brain_image_path,
             "Inside brain mask",
             DetectionStage.filtered_2d,
+            None,
         ),
         (
-            "image",
+            "labels",
             detect_debug.filtered_2d_image_path,
             "Filtered 2D",
             DetectionStage.filtered_2d,
+            detect_debug.settings.detection_dtype,
         ),
         (
-            "image",
+            "labels",
             detect_debug.filtered_3d_image_path,
             "Filtered 3D",
             DetectionStage.filtered_3d,
+            detect_debug.settings.detection_dtype,
         ),
         (
             "labels",
             detect_debug.structs_id_image_path,
             "Detected structures ID",
             DetectionStage.filtered_3d,
+            None,
         ),
         (
             "labels",
             detect_debug.struct_type_image_path,
             "Detected structures type",
             DetectionStage.filtered_3d,
+            None,
         ),
         (
             "labels",
             detect_debug.struct_type_split_image_path,
             "Detected structures type after split",
             DetectionStage.splitting,
+            None,
         ),
     ]:
-        if not (debug_start_from <= stage <= debug_end_on):
+        if not (start_gen_from <= stage <= end_gen_on):
             continue
 
+        bc_y, bc_x = bottom_corner
         final_scale = scale
-        translate = (start_plane, 0, 0)
+        translate = (start_plane, bc_y * scale[1], bc_x * scale[2])
         if name == "Inside brain mask":
             sz, sy, sx = scale
             final_scale = sz, sy * tiler.tile_height, sx * tiler.tile_width
             # due to scaling we need to offset so it aligns. See napari #2778
             translate = (
                 start_plane,
-                (final_scale[1] - scale[1]) / 2,
-                (final_scale[2] - scale[2]) / 2,
+                bc_y * scale[1] + (final_scale[1] - scale[1]) / 2,
+                bc_x * scale[2] + (final_scale[2] - scale[2]) / 2,
             )
+
+        stack = read_z_stack(str(data_path))
+        if dtype is not None:
+            stack = stack.astype(dtype)
 
         f = getattr(viewer, f"add_{tp}")
         f(
-            read_z_stack(str(data_path)),
+            stack,
             scale=final_scale,
             translate=translate,
             name=name,
             visible=False,
         )
 
-    if not (debug_start_from <= DetectionStage.splitting <= debug_end_on):
-        return
-
-    for xml_path, name in [
-        (detect_debug.initial_cell_candidates_path, "Initial cell candidates"),
-        (detect_debug.structs_needs_split_path, "Structs to be split"),
-        (detect_debug.structs_too_big_path, "Structs too big to split"),
+    for yml_path, name, stage in [
+        (
+            detect_debug.initial_cell_candidates_path,
+            "Initial cell candidates",
+            DetectionStage.filtered_3d,
+        ),
+        (
+            detect_debug.structs_needs_split_path,
+            "Structs to be split",
+            DetectionStage.filtered_3d,
+        ),
+        (
+            detect_debug.structs_too_big_path,
+            "Structs too big to split",
+            DetectionStage.filtered_3d,
+        ),
         (
             detect_debug.struct_split_into_cell_candidate_path,
             "Cell candidates from split",
+            DetectionStage.splitting,
         ),
     ]:
+        if not (start_gen_from <= stage <= end_gen_on):
+            continue
+
         try:
-            cells = get_cells(xml_path)
+            cells = get_cells(yml_path)
         except MissingCellsError:
             cells = []
 
+        bc_y, bc_x = bottom_corner
         layer = add_single_layer(
             cells,
             viewer=viewer,
@@ -302,6 +330,7 @@ def debug_results_callback(
             scale=scale,
         )
         layer.visible = False
+        layer.translate = start_plane, bc_y * scale[1], bc_x * scale[2]
 
 
 def find_local_planes(
@@ -403,9 +432,11 @@ def detect_widget() -> FunctionGui:
         pin_memory: bool,
         debug_options,
         debug: bool,
-        debug_start_from: DetectionStage,
-        debug_end_on: DetectionStage,
-        debug_local_store: Path,
+        local_store: Path,
+        start_gen_from: DetectionStage,
+        crop_layer: napari.layers.Shapes | None,
+        end_gen_on: DetectionStage,
+        gen_dir: str,
         reset_button,
     ) -> None:
         """
@@ -606,11 +637,28 @@ def detect_widget() -> FunctionGui:
             pin_memory,
         )
 
+        bottom_corner = 0, 0
+        top_corner = 0, 0
+        if crop_layer is not None and crop_layer.data:
+            shape_arr = crop_layer.data[0]
+            min_vert = (
+                np.round(np.min(shape_arr, axis=0)).astype(np.int_).tolist()
+            )
+            max_vert = (
+                np.round(np.max(shape_arr, axis=0)).astype(np.int_).tolist()
+            )
+
+            bottom_corner = min_vert[1], min_vert[2]
+            top_corner = max_vert[1], max_vert[2]
+
         debug_inputs = DebugInputs(
             debug,
-            debug_start_from,
-            debug_end_on,
-            debug_local_store,
+            bottom_corner,
+            top_corner,
+            start_gen_from,
+            end_gen_on,
+            local_store,
+            gen_dir,
         )
 
         if debug:
@@ -634,8 +682,9 @@ def detect_widget() -> FunctionGui:
                     options["viewer"],
                     options["signal_image"].scale,
                     start_plane,
-                    debug_start_from,
-                    debug_end_on,
+                    bottom_corner,
+                    start_gen_from,
+                    end_gen_on,
                 )
             )
         else:

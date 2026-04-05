@@ -1,10 +1,19 @@
-from typing import List, Optional, Tuple
+from collections import defaultdict
+from functools import partial
+from typing import Any, List, Optional, Tuple
 
 import napari
 import napari.layers
 import numpy as np
 from brainglobe_utils.cells.cells import Cell
 from brainglobe_utils.qtpy.logo import header_widget
+
+EMPTY_VALUE = object()
+
+
+def empty_object_array(n):
+    """Returns an array of the given size filled with the empty sentinel."""
+    return np.full(n, EMPTY_VALUE, dtype=object)
 
 
 def html_label_widget(label: str, *, tag: str = "b") -> dict:
@@ -51,8 +60,17 @@ def add_classified_layers(
     the napari viewer. Does not add any other cell types, only Cell.UNKNOWN
     and Cell.CELL from the list of cells.
     """
+    cells_metadata, cells_metadata_defaults = cells_metadata_to_arrays(
+        points, Cell.CELL
+    )
+    non_cells_metadata, non_cells_metadata_defaults = cells_metadata_to_arrays(
+        points, Cell.UNKNOWN
+    )
+
     layer_unk = viewer.add_points(
         cells_to_array(points, Cell.UNKNOWN, napari_order=True),
+        features=non_cells_metadata,
+        feature_defaults=non_cells_metadata_defaults,
         name=unknown_name,
         size=15,
         n_dimensional=True,
@@ -65,6 +83,8 @@ def add_classified_layers(
     )
     layer_cells = viewer.add_points(
         cells_to_array(points, Cell.CELL, napari_order=True),
+        features=cells_metadata,
+        feature_defaults=cells_metadata_defaults,
         name=cell_name,
         size=15,
         n_dimensional=True,
@@ -88,8 +108,11 @@ def add_single_layer(
     Adds all cells of cell_type Cell.TYPE to a new point layer in the napari
     viewer, with given name.
     """
+    metadata, metadata_defaults = cells_metadata_to_arrays(points, cell_type)
     layer = viewer.add_points(
         cells_to_array(points, cell_type, napari_order=True),
+        features=metadata,
+        feature_defaults=metadata_defaults,
         name=name,
         size=15,
         n_dimensional=True,
@@ -101,6 +124,36 @@ def add_single_layer(
         scale=scale,
     )
     return layer
+
+
+def cells_metadata_to_arrays(
+    cells: list[Cell], type: int
+) -> tuple[dict[Any, np.ndarray], dict[Any, object]]:
+    """
+    Given a list of cells, after filtering out any cells not of the `type`, it
+    returns a dictionary representing all the metadata of all the cells. This
+    can be passed to napari as features of the point layer.
+
+    The dictionary's keys are the union of all the keys of the metadata of all
+    the cells. Their values are each a np object array filled with the empty
+    sentinel, except for those cells who have values for the given key.
+
+    Napari will track this in the points layer, adjusting the size of the
+    arrays when new points are added/removed in the GUI. Via feature_defaults,
+    napari sets new points values to the sentinel value.
+    """
+    cells = [c for c in cells if c.type == type]
+
+    # any new metadata key we encounter, if we haven't seen it, we create an
+    # empty array filled with the sentinel. Only those cells who have values
+    # for a given key have a non-sentinel value
+    data: dict = defaultdict(partial(empty_object_array, len(cells)))
+    for i, cell in enumerate(cells):
+        for key, value in cell.metadata.items():
+            data[key][i] = value
+
+    defaults = {key: EMPTY_VALUE for key in data.keys()}
+    return data, defaults
 
 
 def cells_to_array(

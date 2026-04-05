@@ -233,18 +233,20 @@ class DebugInputs(InputContainer):
     """Container for miscellaneous inputs."""
 
     debug: bool = False
-    debug_start_from: DetectionStage = DetectionStage.input
-    debug_end_on: DetectionStage = DetectionStage.splitting
-    debug_local_store: Path = Path.home()
+    bottom_corner: tuple[int, int] = 0, 0
+    top_corner: tuple[int, int] = 0, 0
+    start_gen_from: DetectionStage = DetectionStage.input
+    end_gen_on: DetectionStage = DetectionStage.splitting
+    local_store: Path = Path.home()
+    gen_dir: str = ""
 
     @classmethod
     def widget_representation(cls) -> dict:
         return dict(
             debug_options=html_label_widget("Debug:"),
             debug=dict(value=cls.defaults()["debug"]),
-            debug_start_from=dict(value=cls.defaults()["debug_start_from"]),
-            debug_end_on=dict(value=cls.defaults()["debug_end_on"]),
-            debug_local_store=dict(
-                value=cls.defaults()["debug_local_store"], mode="d"
-            ),
+            start_gen_from=dict(value=cls.defaults()["start_gen_from"]),
+            end_gen_on=dict(value=cls.defaults()["end_gen_on"]),
+            local_store=dict(value=cls.defaults()["local_store"], mode="d"),
+            gen_dir=dict(value=cls.defaults()["gen_dir"]),
         )
