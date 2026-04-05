@@ -113,6 +113,7 @@ class DebugWorker(Worker):
 
     def work(self) -> DetectionDebug:
         self.update_progress_bar.emit("Setting up detection...", 1, 0)
+
         data = self.data_inputs
         detect = self.detection_inputs
         misc = self.misc_inputs
@@ -121,11 +122,28 @@ class DebugWorker(Worker):
         arr = data.signal_array
         start = misc.start_plane
         end = misc.end_plane
-        n = min(len(arr) if end <= 0 else end, len(arr)) - start
+
+        plane_size = arr.shape[1], arr.shape[2]
+        if DetectionDebug.needs_crop(debug.bottom_corner, debug.top_corner):
+            bot_y, bot_x = debug.bottom_corner
+            top_y, top_x = debug.top_corner
+            plane_size = top_y - bot_y, top_x - bot_x
+
+        start = max(start, 0)
+        end = min(len(arr) if end <= 0 else end, len(arr))
+        n = max(end - start, 0)
+
+        local_store = debug.local_store
+        local_store_loader = None
+        if debug.gen_dir:
+            local_store_loader = DetectionDebug(
+                (0, 0, 0), local_store=local_store
+            )
+            local_store = local_store / debug.gen_dir
 
         detect_debug = DetectionDebug(
-            signal_shape=(n, arr.shape[1], arr.shape[2]),
-            local_store=debug.debug_local_store,
+            signal_shape=(n, plane_size[0], plane_size[1]),
+            local_store=local_store,
             batch_size=detect.detection_batch_size,
             torch_device="cuda" if misc.use_gpu else "cpu",
             dtype=np.uint16,
@@ -152,20 +170,27 @@ class DebugWorker(Worker):
             n_sds_above_mean_tiled_thresh=detect.n_sds_above_mean_tiled_thresh,
             tiled_thresh_tile_size=detect.tiled_thresh_tile_size,
         )
+        detect_debug.load_data(
+            signal=arr,
+            local_store_loader=local_store_loader,
+            start_gen_from=debug.start_gen_from,
+            end_gen_on=debug.end_gen_on,
+            start_plane=start,
+            end_plane=end,
+            bottom_corner=debug.bottom_corner,
+            top_corner=debug.top_corner,
+        )
 
-        def progress_callback(plane: int) -> None:
+        def progress_callback(total_count: int, count: int, msg: str) -> None:
             self.update_progress_bar.emit(
-                "Detecting cells",
-                n,
-                plane + 1,
+                msg,
+                total_count,
+                count + 1,
             )
 
         detect_debug.run_filter(
-            start_from_stage=debug.debug_start_from,
-            end_on_stage=debug.debug_end_on,
-            signal=arr,
-            start_plane=start,
-            end_plane=end,
+            start_gen_from=debug.start_gen_from,
+            end_gen_on=debug.end_gen_on,
             progress_callback=progress_callback,
         )
 

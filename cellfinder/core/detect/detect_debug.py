@@ -5,7 +5,7 @@ import pickle
 from enum import IntEnum, auto
 from functools import cached_property, partial
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Type
 
 import numpy as np
 import tifffile
@@ -14,7 +14,9 @@ import tqdm
 from brainglobe_utils.cells.cells import Cell
 from brainglobe_utils.IO.cells import save_cells
 from brainglobe_utils.IO.image.load import read_z_stack
+from brainglobe_utils.IO.yaml import save_yaml
 
+from cellfinder.core import types
 from cellfinder.core.detect.filters.plane import TileProcessor
 from cellfinder.core.detect.filters.setup_filters import DetectionSettings
 from cellfinder.core.detect.filters.volume.ball_filter import BallFilter
@@ -45,6 +47,16 @@ class DetectionDebug:
     settings: DetectionSettings
 
     splitting_settings: DetectionSettings
+
+    input_settings: dict
+
+    signal_array: types.array | None = None
+
+    clipped_data: types.array | None = None
+
+    inside_data: types.array | None = None
+
+    filtered_2d_data: types.array | None = None
 
     def __init__(
         self,
@@ -79,6 +91,7 @@ class DetectionDebug:
             use_scipy = torch_device != "cuda"
         self.use_scipy = use_scipy
         self.local_store = Path(local_store)
+        self.input_settings = {}
 
         self.settings = DetectionSettings(
             plane_original_np_dtype=dtype,
@@ -120,19 +133,19 @@ class DetectionDebug:
 
     @property
     def initial_cell_candidates_path(self) -> Path:
-        return self.local_store / "struct_cell_candidate.xml"
+        return self.local_store / "struct_cell_candidate.yml"
 
     @property
     def structs_needs_split_path(self) -> Path:
-        return self.local_store / "struct_needs_split.xml"
+        return self.local_store / "struct_needs_split.yml"
 
     @property
     def structs_too_big_path(self) -> Path:
-        return self.local_store / "struct_too_big.xml"
+        return self.local_store / "struct_too_big.yml"
 
     @property
     def struct_split_into_cell_candidate_path(self) -> Path:
-        return self.local_store / "struct_split_into_cell_candidate.xml"
+        return self.local_store / "struct_split_into_cell_candidate.yml"
 
     @property
     def input_image_path(self) -> Path:
@@ -169,6 +182,10 @@ class DetectionDebug:
     @property
     def struct_type_split_image_path(self) -> Path:
         return self.local_store / "struct_type_split"
+
+    @property
+    def config_yaml_path(self) -> Path:
+        return self.local_store / "detection_config.yml"
 
     @cached_property
     def tile_processor(self) -> TileProcessor:
@@ -215,6 +232,24 @@ class DetectionDebug:
             start_z=self.ball_filter.first_valid_plane,
             soma_centre_value=settings.detection_soma_centre_value,
         )
+
+    @classmethod
+    def needs_crop(
+        cls,
+        bottom_corner: tuple[int, int] = (0, 0),
+        top_corner: tuple[int, int] = (0, 0),
+    ) -> bool:
+        bot_y, bot_x = bottom_corner
+        top_y, top_x = top_corner
+        crop = (
+            bot_y >= 0
+            and bot_x >= 0
+            and top_y > 0
+            and top_x > 0
+            and bot_y < top_y
+            and bot_x < top_x
+        )
+        return crop
 
     def save_tiffs(
         self,
@@ -275,88 +310,203 @@ class DetectionDebug:
                 "struct_id", n_saved_planes, buff.astype(np.uint32)
             )
 
-    def _load_signal_data(
+    def get_image(
         self,
-        signal: Path | str | np.ndarray | None,
-        start_plane: int,
-        end_plane: int,
-    ):
-        signal_array = signal
-        if not isinstance(signal, np.ndarray):
-            signal_array = read_z_stack(str(signal))
-
-        if end_plane <= 0:
-            end_plane = len(signal_array)
-        signal_array = signal_array[start_plane:end_plane, :, :]
-
-        if signal_array.shape != self.signal_shape:
+        arr_or_path: Path | str | types.array | None = None,
+        local_prefix: str = "",
+        dtype: Type | None = None,
+    ) -> types.array:
+        if arr_or_path is not None:
+            data = arr_or_path
+            if not isinstance(arr_or_path, types.array):
+                data = read_z_stack(str(arr_or_path))
+        elif local_prefix:
+            data = read_z_stack(str(self.local_store / local_prefix))
+        else:
             raise ValueError(
-                f"Expected signal with shape {self.signal_shape}, "
-                f"got {signal_array.shape}"
+                "Either an array, image, path or local store prefix must "
+                "be provided"
             )
 
-        return signal_array
-
-    def _read_image_from_local_store(self, prefix: str):
-        data = read_z_stack(str(self.local_store / prefix))
         if data.shape[0] != self.signal_shape[0]:
             raise ValueError(
-                f"Expected {self.signal_shape[0]} planes from {prefix}, "
-                f"got {data.shape[0]}"
+                f"Expected {self.signal_shape[0]} planes, got {data.shape[0]}"
             )
+
+        if dtype is not None:
+            data = data.astype(dtype)
 
         return data
 
-    def _load_data(
+    def _crop_image_if_needed(
         self,
-        start_from_stage: DetectionStage,
-        end_on_stage: DetectionStage,
-        signal: Path | str | np.ndarray | None = None,
+        data: types.array,
         start_plane: int = 0,
         end_plane: int = 0,
-    ):
-        # we always need the input signal data for all stages. But we load from
-        # input only if we start at input
+        bottom_corner: tuple[int, int] = (0, 0),
+        top_corner: tuple[int, int] = (0, 0),
+    ) -> types.array:
+        bot_y, bot_x = bottom_corner
+        top_y, top_x = top_corner
+
+        start_plane = max(start_plane, 0)
+        bot_y = max(bot_y, 0)
+        bot_x = max(bot_x, 0)
+
+        if end_plane <= 0:
+            end_plane = data.shape[0]
+        if top_y <= 0:
+            top_y = data.shape[1]
+        if top_x <= 0:
+            top_x = data.shape[2]
+
+        return data[start_plane:end_plane, bot_y:top_y, bot_x:top_x]
+
+    def _load_detected_structs(
+        self,
+        local_store_loader: "DetectionDebug" = None,
+        start_plane: int = 0,
+        end_plane: int = 0,
+        bottom_corner: tuple[int, int] = (0, 0),
+        top_corner: tuple[int, int] = (0, 0),
+    ) -> None:
+        bot_y, bot_x = bottom_corner
+        top_y, top_x = top_corner
+
+        crop = self.needs_crop(bottom_corner, top_corner)
+        needs_z_slice = end_plane > 0 and start_plane >= 0
+
+        cell_detector = self.cell_detector
+
+        structures_data_path = self.structures_data_path
+        if local_store_loader is not None:
+            structures_data_path = local_store_loader.structures_data_path
+        with open(structures_data_path, "rb") as fh:
+            structs = pickle.load(fh)
+
+        for sid, arr, intensity in structs:
+            # check first z, so we don't need to check those outside the z
+            # planes during cropping
+            if needs_z_slice:
+                mask = (start_plane <= arr[:, 2]) & (arr[:, 2] < end_plane)
+
+                if not np.any(mask):
+                    continue
+                arr = arr[mask, :]
+                intensity = intensity[mask]
+
+            if crop:
+                mask = (bot_x <= arr[:, 0]) & (arr[:, 0] < top_x)
+                mask = mask & (bot_y <= arr[:, 1]) & (arr[:, 1] < top_y)
+
+                if not np.any(mask):
+                    continue
+                arr = arr[mask, :]
+                intensity = intensity[mask]
+
+            cell_detector.add_points(sid, arr, intensity)
+
+    def load_data(
+        self,
+        signal: Path | str | np.ndarray | None = None,
+        local_store_loader: "DetectionDebug" = None,
+        start_gen_from: DetectionStage = DetectionStage.input,
+        end_gen_on: DetectionStage = DetectionStage.splitting,
+        start_plane: int = 0,
+        end_plane: int = 0,
+        bottom_corner: tuple[int, int] = (0, 0),
+        top_corner: tuple[int, int] = (0, 0),
+    ) -> None:
+        self.input_settings = {
+            "start_gen_from": start_gen_from,
+            "end_gen_on": end_gen_on,
+            "start_plane": start_plane,
+            "end_plane": end_plane,
+            "bottom_corner": bottom_corner,
+            "top_corner": top_corner,
+            "input": (
+                ""
+                if signal is None or isinstance(signal, np.ndarray)
+                else str(signal)
+            ),
+        }
+
+        crop_f = partial(
+            self._crop_image_if_needed,
+            start_plane=start_plane,
+            end_plane=end_plane,
+            bottom_corner=bottom_corner,
+            top_corner=top_corner,
+        )
+
+        # we need the input signal data for all filtering stages except
+        # splitting. But we load from input only if we start at input
         self.signal_array = None
-        if start_from_stage == DetectionStage.input <= end_on_stage:
-            if signal is None:
+        if start_gen_from == DetectionStage.input <= end_gen_on:
+            if signal is not None:
+                data = self.get_image(arr_or_path=signal)
+            elif local_store_loader is not None:
+                data = self.get_image(
+                    arr_or_path=local_store_loader.input_image_path
+                )
+            else:
+                # can't get input data from our store, if we start with input
                 raise ValueError("Input data not provided")
-            self.signal_array = self._load_signal_data(
-                signal, start_plane, end_plane
-            )
-        else:
-            self.signal_array = self._read_image_from_local_store("input")
 
-        # we only use clipped data when doing enhancement filter. If starting
-        # before enhancement we use the generated clipped data directly
+            self.signal_array = crop_f(data)
+        elif start_gen_from < DetectionStage.splitting:
+            if local_store_loader is None:
+                data = self.get_image(local_prefix="input")
+            else:
+                data = self.get_image(
+                    arr_or_path=local_store_loader.input_image_path
+                )
+
+            self.signal_array = crop_f(data)
+
+        # we only use clipped data when passing input to enhancement filter.
+        # If starting before enhancement we use the generated data
         self.clipped_data = None
-        if start_from_stage == DetectionStage.enhanced <= end_on_stage:
-            self.clipped_data = self._read_image_from_local_store("clipped")
+        if start_gen_from == DetectionStage.enhanced <= end_gen_on:
+            if local_store_loader is None:
+                data = self.get_image(local_prefix="clipped")
+            else:
+                data = self.get_image(
+                    arr_or_path=local_store_loader.clipped_input_image_path
+                )
+            self.clipped_data = crop_f(data)
 
-        # we only use 2d filtered data when doing 3d filter. If starting
-        # before 3d filtering we use the generated 2d data directly
+        # we only use 2d filtered data when passing input to the 3d filter. If
+        # starting before 3d filtering we use the generated 2d data directly
         self.inside_data = None
         self.filtered_2d_data = None
-        if start_from_stage == DetectionStage.filtered_3d <= end_on_stage:
-            self.inside_data = self._read_image_from_local_store(
-                "inside_brain"
+        if start_gen_from == DetectionStage.filtered_3d <= end_gen_on:
+            if local_store_loader is None:
+                inside_data = self.get_image(local_prefix="inside_brain")
+                filtered_data = self.get_image(local_prefix="filtered_2d")
+            else:
+                inside_data = self.get_image(
+                    arr_or_path=local_store_loader.inside_brain_image_path
+                )
+                filtered_data = self.get_image(
+                    arr_or_path=local_store_loader.filtered_2d_image_path
+                )
+            self.inside_data = crop_f(inside_data)
+            self.filtered_2d_data = crop_f(filtered_data)
+
+        # if starting from before splitting, we generate the cell data anew so
+        # only load existing data if starting at splitting
+        if start_gen_from == DetectionStage.splitting <= end_gen_on:
+            self._load_detected_structs(
+                local_store_loader,
+                start_plane,
+                end_plane,
+                bottom_corner,
+                top_corner,
             )
-
-            self.filtered_2d_data = self._read_image_from_local_store(
-                "filtered_2d"
-            )
-
-        # if starting from before splitting, we generate the cell data anew
-        if start_from_stage == DetectionStage.splitting <= end_on_stage:
-            cell_detector = self.cell_detector
-            with open(self.structures_data_path, "rb") as fh:
-                structs = pickle.load(fh)
-
-            for sid, arr, intensity in structs:
-                cell_detector.add_points(sid, arr, intensity)
 
     def batch_input(
-        self, i, start_from_stage: DetectionStage, end_on_stage: DetectionStage
+        self, i, start_gen_from: DetectionStage, end_gen_on: DetectionStage
     ):
         batch_size = self.batch_size
 
@@ -366,7 +516,7 @@ class DetectionDebug:
         batch_np = self.settings.filter_data_converter_func(batch_np)
         batch_torch = torch.from_numpy(batch_np).to(self.torch_device)
 
-        if start_from_stage <= DetectionStage.input <= end_on_stage:
+        if start_gen_from <= DetectionStage.input <= end_gen_on:
             self.save_tiffs("input", i, batch_np)
 
         return batch_torch, batch_np
@@ -375,14 +525,14 @@ class DetectionDebug:
         self,
         i,
         batch_torch,
-        start_from_stage: DetectionStage,
-        end_on_stage: DetectionStage,
+        start_gen_from: DetectionStage,
+        end_gen_on: DetectionStage,
     ):
-        if start_from_stage <= DetectionStage.clipped <= end_on_stage:
+        if start_gen_from <= DetectionStage.clipped <= end_gen_on:
             batch_clipped = torch.clone(batch_torch)
             torch.clip_(batch_clipped, 0, self.tile_processor.clipping_value)
             self.save_tiffs("clipped", i, batch_clipped)
-        elif start_from_stage == DetectionStage.enhanced <= end_on_stage:
+        elif start_gen_from == DetectionStage.enhanced <= end_gen_on:
             batch_clipped = self.clipped_data[i : i + self.batch_size]
             batch_clipped = np.asarray(
                 batch_clipped, dtype=self.settings.filtering_dtype
@@ -399,10 +549,10 @@ class DetectionDebug:
         self,
         i,
         batch_clipped,
-        start_from_stage: DetectionStage,
-        end_on_stage: DetectionStage,
+        start_gen_from: DetectionStage,
+        end_gen_on: DetectionStage,
     ):
-        if start_from_stage <= DetectionStage.enhanced <= end_on_stage:
+        if start_gen_from <= DetectionStage.enhanced <= end_gen_on:
             enhanced_planes = self.tile_processor.peak_enhancer.enhance_peaks(
                 batch_clipped
             )
@@ -412,16 +562,16 @@ class DetectionDebug:
         self,
         i,
         batch_torch,
-        start_from_stage: DetectionStage,
-        end_on_stage: DetectionStage,
+        start_gen_from: DetectionStage,
+        end_gen_on: DetectionStage,
     ):
-        if start_from_stage <= DetectionStage.filtered_2d <= end_on_stage:
+        if start_gen_from <= DetectionStage.filtered_2d <= end_gen_on:
             filtered_2d, inside_brain_tiles = (
                 self.tile_processor.get_tile_mask(batch_torch)
             )
             self.save_tiffs("inside_brain", i, inside_brain_tiles)
             self.save_tiffs("filtered_2d", i, filtered_2d)
-        elif start_from_stage == DetectionStage.filtered_3d <= end_on_stage:
+        elif start_gen_from == DetectionStage.filtered_3d <= end_gen_on:
             inside_brain_tiles = self.inside_data[i : i + self.batch_size]
             inside_brain_tiles = np.asarray(inside_brain_tiles, dtype=bool)
             inside_brain_tiles = torch.from_numpy(inside_brain_tiles).to(
@@ -447,20 +597,19 @@ class DetectionDebug:
         batch_np,
         n_3d_planes: int,
         previous_plane: np.ndarray,
-        start_from_stage: DetectionStage,
-        end_on_stage: DetectionStage,
+        start_gen_from: DetectionStage,
+        end_gen_on: DetectionStage,
     ):
         middle_planes = None
-        if (
-            start_from_stage > DetectionStage.filtered_3d
-            or end_on_stage < DetectionStage.filtered_3d
-        ):
+        if not (start_gen_from <= DetectionStage.filtered_3d <= end_gen_on):
             return n_3d_planes, previous_plane, middle_planes
 
         ball_filter = self.ball_filter
         detection_converter = self.settings.detection_data_converter_func
 
-        ball_filter.append(filtered_2d, inside_brain_tiles, batch_np)
+        # ball_filter.append(filtered_2d, inside_brain_tiles, batch_np)
+        ball_filter.inside_brain_tiles = None
+        ball_filter.append(filtered_2d, None, batch_np)
         if ball_filter.ready:
             ball_filter.walk()
             middle_planes = ball_filter.get_processed_planes()
@@ -491,58 +640,12 @@ class DetectionDebug:
 
         return n_3d_planes, previous_plane, middle_planes
 
-    def split_structs(self, structs_to_split, volume: np.ndarray, color: int):
-        next_sid = self.cell_detector.next_structure_id
-        metadata = {
-            "struct_size": 0,
-            "struct_id": 0,
-            "struct_type": "struct_split_cell_candidate",
-        }
-        cells = []
-
-        progress_bar = tqdm.tqdm(
-            total=len(structs_to_split), desc="Splitting cell clusters"
-        )
-
-        f = partial(_split_cells, settings=self.splitting_settings)
-        ctx = mp.get_context("spawn")
-        # we can't use the context manager because of coverage issues:
-        # https://pytest-cov.readthedocs.io/en/latest/subprocess-support.html
-        pool = ctx.Pool(processes=self.settings.n_processes)
-        try:
-            for structures, did_split in pool.imap_unordered(
-                f, structs_to_split
-            ):
-                for cid, (centre, arr) in structures.items():
-                    metadata["struct_size"] = len(arr)
-                    if did_split:
-                        metadata["struct_id"] = next_sid
-                        next_sid += 1
-                    else:
-                        assert len(structures) == 1
-                        metadata["struct_id"] = cid
-
-                    volume[arr[:, 2], arr[:, 1], arr[:, 0]] = color
-                    cells.append(Cell(centre, Cell.UNKNOWN, metadata=metadata))
-
-                progress_bar.update()
-        finally:
-            pool.close()
-            pool.join()
-
-        progress_bar.close()
-
-        return cells
-
     def process_structures(
         self,
-        start_from_stage: DetectionStage,
-        end_on_stage: DetectionStage,
+        start_gen_from: DetectionStage,
+        end_gen_on: DetectionStage,
     ):
-        if (
-            start_from_stage > DetectionStage.splitting
-            or end_on_stage < DetectionStage.splitting
-        ):
+        if not (start_gen_from <= DetectionStage.filtered_3d <= end_gen_on):
             return
 
         min_split_size = self.settings.max_cell_volume
@@ -553,20 +656,20 @@ class DetectionDebug:
 
         shape = self.signal_shape
         struct_type_vol = np.zeros(shape, dtype=np.uint8)
-        struct_type_split_vol = np.zeros(shape, dtype=np.uint8)
 
         cells = {
             "struct_cell_candidate": [],
             "struct_needs_split": [],
             "struct_too_big": [],
-            "struct_split_into_cell_candidate": [],
         }
-        structs_to_split = []
 
         s_intensities = cell_detector.get_structures_intensities()
         n = cell_detector.n_structures
         for cell_id, arr in tqdm.tqdm(
-            cell_detector.get_structures().items(), total=n, unit="structures"
+            cell_detector.get_structures().items(),
+            total=n,
+            unit="structures",
+            desc="Processing structures",
         ):
             structs_pkl.append((cell_id, arr, s_intensities[cell_id]))
 
@@ -597,59 +700,157 @@ class DetectionDebug:
             )
             struct_type_vol[arr[:, 2], arr[:, 1], arr[:, 0]] = color
 
-            if tp == "struct_needs_split":
-                structs_to_split.append((cell_id, arr, intensity))
-            else:
-                struct_type_split_vol[arr[:, 2], arr[:, 1], arr[:, 0]] = color
-
-        cells["struct_split_into_cell_candidate"] = self.split_structs(
-            structs_to_split, struct_type_split_vol, 2
-        )
-
         with open(self.structures_data_path, "wb") as fh:
             pickle.dump(structs_pkl, fh, pickle.HIGHEST_PROTOCOL)
 
         self.save_tiffs("struct_type", 0, struct_type_vol)
+
+        for name, item_cells in cells.items():
+            save_cells(item_cells, str(self.local_store / f"{name}.yml"))
+
+    def split_structs(
+        self,
+        structs_to_split,
+        volume: np.ndarray,
+        color: int,
+        progress_callback: Callable[[int, int, str], None] = None,
+    ) -> list[Cell]:
+        next_sid = self.cell_detector.next_structure_id
+        metadata = {
+            "original_struct_id": 0,
+            "struct_size": 0,
+            "struct_id": 0,
+            "struct_type": "struct_split_cell_candidate",
+        }
+        cells = []
+        total_structs = len(structs_to_split)
+        progress_bar = tqdm.tqdm(
+            total=total_structs, desc="Splitting cell clusters"
+        )
+
+        f = partial(_split_cells, settings=self.splitting_settings)
+        ctx = mp.get_context("spawn")
+        # we can't use the context manager because of coverage issues:
+        # https://pytest-cov.readthedocs.io/en/latest/subprocess-support.html
+        pool = ctx.Pool(processes=self.settings.n_processes)
+        i = 0
+        try:
+            for structures, did_split, orig_cid in pool.imap_unordered(
+                f, structs_to_split
+            ):
+                metadata["original_struct_id"] = orig_cid
+                for cid, (centre, arr) in structures.items():
+                    metadata["struct_size"] = len(arr)
+                    if did_split:
+                        metadata["struct_id"] = next_sid
+                        next_sid += 1
+                    else:
+                        assert len(structures) == 1
+                        metadata["struct_id"] = cid
+
+                    volume[arr[:, 2], arr[:, 1], arr[:, 0]] = color
+                    cells.append(Cell(centre, Cell.UNKNOWN, metadata=metadata))
+
+                if not i % 100:
+                    progress_callback(total_structs, i, "Splitting cells")
+                i += 1
+                progress_bar.update()
+        finally:
+            pool.close()
+            pool.join()
+
+        progress_bar.close()
+
+        return cells
+
+    def process_structure_splitting(
+        self,
+        start_gen_from: DetectionStage,
+        end_gen_on: DetectionStage,
+        progress_callback: Callable[[int, int, str], None] = None,
+    ):
+        if not (start_gen_from <= DetectionStage.splitting <= end_gen_on):
+            return
+
+        min_split_size = self.settings.max_cell_volume
+        max_split_size = self.settings.max_cluster_size
+        detect_coi = self.settings.detect_centre_of_intensity
+        cell_detector = self.cell_detector
+
+        shape = self.signal_shape
+        struct_type_split_vol = np.zeros(shape, dtype=np.uint8)
+
+        structs_to_split = []
+
+        s_intensities = cell_detector.get_structures_intensities()
+        n = cell_detector.n_structures
+        for cell_id, arr in tqdm.tqdm(
+            cell_detector.get_structures().items(),
+            total=n,
+            unit="structures",
+            desc="Finding structures to split",
+        ):
+            struct_size = len(arr)
+
+            if struct_size < min_split_size:
+                color = 1
+            elif struct_size < max_split_size:
+                color = None
+            else:
+                color = 3
+
+            if color is None:
+                intensity = s_intensities[cell_id] if detect_coi else None
+                structs_to_split.append((cell_id, arr, intensity))
+            else:
+                struct_type_split_vol[arr[:, 2], arr[:, 1], arr[:, 0]] = color
+
+        struct_split_into_cell_candidate = self.split_structs(
+            structs_to_split, struct_type_split_vol, 2, progress_callback
+        )
+
         self.save_tiffs(
             "struct_type_split",
             0,
             struct_type_split_vol,
         )
 
-        for name, item_cells in cells.items():
-            save_cells(item_cells, str(self.local_store / f"{name}.xml"))
+        save_cells(
+            struct_split_into_cell_candidate,
+            str(self.local_store / "struct_split_into_cell_candidate.yml"),
+        )
 
     def run_filter(
         self,
-        start_from_stage: DetectionStage = DetectionStage.input,
-        end_on_stage: DetectionStage = DetectionStage.splitting,
-        signal: Path | str | np.ndarray | None = None,
-        start_plane: int = 0,
-        end_plane: int = 0,
-        progress_callback: Callable[[int], None] = None,
+        start_gen_from: DetectionStage = DetectionStage.input,
+        end_gen_on: DetectionStage = DetectionStage.splitting,
+        progress_callback: Callable[[int, int, str], None] = None,
     ):
-        self._load_data(
-            start_from_stage, end_on_stage, signal, start_plane, end_plane
-        )
-
         previous_plane = None
         n_3d_planes = 0
         middle_planes = None
+        n_planes = self.signal_shape[0]
 
-        for i in tqdm.tqdm(
-            range(0, self.signal_shape[0], self.batch_size), unit="planes"
-        ):
+        self.local_store.mkdir(parents=True, exist_ok=True)
+        save_yaml(
+            {
+                "settings": self.settings,
+                "splitting_settings": self.splitting_settings,
+                "input_settings": self.input_settings,
+            },
+            self.config_yaml_path,
+        )
+
+        for i in tqdm.tqdm(range(0, n_planes, self.batch_size), unit="planes"):
             batch_torch, batch_np = self.batch_input(
-                i, start_from_stage, end_on_stage
+                i, start_gen_from, end_gen_on
             )
             batch_clipped = self.batch_clip(
-                i, batch_torch, start_from_stage, end_on_stage
+                i, batch_torch, start_gen_from, end_gen_on
             )
-            self.batch_enhanced(
-                i, batch_clipped, start_from_stage, end_on_stage
-            )
+            self.batch_enhanced(i, batch_clipped, start_gen_from, end_gen_on)
             filtered_2d, inside_brain_tiles = self.batch_filter_2d(
-                i, batch_torch, start_from_stage, end_on_stage
+                i, batch_torch, start_gen_from, end_gen_on
             )
             n_3d_planes, previous_plane, middle_planes = self.batch_filter_3d(
                 i,
@@ -658,24 +859,29 @@ class DetectionDebug:
                 batch_np,
                 n_3d_planes,
                 previous_plane,
-                start_from_stage,
-                end_on_stage,
+                start_gen_from,
+                end_gen_on,
             )
 
             if progress_callback is not None:
-                progress_callback(i)
+                progress_callback(n_planes, i, "Detecting cells")
 
-        if start_from_stage <= DetectionStage.filtered_3d <= end_on_stage:
+        if start_gen_from <= DetectionStage.filtered_3d <= end_gen_on:
             self.pad_3d_filtered_images(
                 middle_planes[0, :, :],
                 n_3d_planes,
             )
 
-        self.process_structures(start_from_stage, end_on_stage)
+        self.process_structures(start_gen_from, end_gen_on)
+        self.process_structure_splitting(
+            start_gen_from, end_gen_on, progress_callback
+        )
 
 
 @inference_wrapper
-def _split_cells(arg, settings: DetectionSettings):
+def _split_cells(
+    arg, settings: DetectionSettings
+) -> tuple[dict[int, tuple[np.ndarray, np.ndarray]], bool, int]:
     # runs in its own process for a bright region to be split.
     # For splitting cells, we only run with one thread. Because the volume is
     # likely small and using multiple threads would cost more in overhead than
@@ -687,7 +893,7 @@ def _split_cells(arg, settings: DetectionSettings):
             cell_points, settings=settings, intensity=intensity
         )
         if detector is None:
-            return {cell_id: (centers[0, :], cell_points)}, False
+            return {cell_id: (centers[0, :], cell_points)}, False, cell_id
 
         structures = {}
         cell_detector_split, offset = detector
@@ -705,7 +911,7 @@ def _split_cells(arg, settings: DetectionSettings):
             center_split = get_structure_centre(arr_split, intensity_split)
             structures[cell_id_split] = center_split, arr_split
 
-        return structures, True
+        return structures, True, cell_id
     except (ValueError, AssertionError) as err:
         raise StructureSplitException(f"Cell {cell_id}, error; {err}")
 
@@ -737,8 +943,12 @@ if __name__ == "__main__":
             n_sds_above_mean_tiled_thresh=1.25,
             tiled_thresh_tile_size=5,
         )
-        detection_debug.run_filter(
+        detection_debug.load_data(
             signal=r"D:\code_data\lightsheet\cellfinder\MF1_378M_W_BS_561_cropped.tif",
-            start_from_stage=DetectionStage.splitting,
-            end_on_stage=DetectionStage.splitting,
+            start_gen_from=DetectionStage.input,
+            end_gen_on=DetectionStage.splitting,
+        )
+        detection_debug.run_filter(
+            start_gen_from=DetectionStage.input,
+            end_gen_on=DetectionStage.splitting,
         )
