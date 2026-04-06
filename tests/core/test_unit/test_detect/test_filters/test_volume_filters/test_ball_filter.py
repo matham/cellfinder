@@ -52,19 +52,61 @@ def test_filter_not_ready():
 @pytest.mark.parametrize(
     "sizes", [(1, 0, 0), (2, 1, 0), (3, 1, 1), (4, 2, 1), (5, 2, 2), (6, 3, 2)]
 )
-def test_filter_plane_params(sizes):
-    kernel_size, start_offset, remaining = sizes
+@pytest.mark.parametrize("batch_size", [1, 2])
+def test_filter_plane_params(sizes, batch_size):
+    kernel_size, first_plane, remaining_planes = sizes
     # we get exactly one plane out of a volume that is the same size as the
-    # kernel start_offset is index of first valid plane. Plus remaining is last
+    # kernel first_plane is index of first valid plane. Plus remaining is last
     # index. Plus 1 is size
-    assert kernel_size == start_offset + 1 + remaining
+    assert kernel_size == first_plane + 1 + remaining_planes
 
     kwargs = bf_kwargs.copy()
     kwargs["ball_z_size"] = kernel_size
-    bf = BallFilter(**kwargs)
+    bf = BallFilter(use_mask=True, **kwargs)
 
-    assert bf.first_valid_plane == start_offset
-    assert bf.remaining_planes == remaining
+    assert not bf.ready
+    assert not bf.volume.shape[0]
+    assert not bf.inside_brain_tiles.shape[0]
+
+    planes = torch.zeros(
+        (batch_size, bf_kwargs["plane_height"], bf_kwargs["plane_width"]),
+        device=bf_kwargs["torch_device"],
+        dtype=bf.volume.dtype,
+    )
+    masks = torch.ones(
+        (batch_size, *bf.inside_brain_tiles.shape[1:]),
+        device=bf_kwargs["torch_device"],
+        dtype=bf.inside_brain_tiles.dtype,
+    )
+
+    bf.append(planes, masks)
+    assert bf.volume.shape[0] == first_plane + batch_size
+    assert bf.inside_brain_tiles.shape[0] == first_plane + batch_size
+
+    n_gotten = 0
+    if bf.ready:
+        assert remaining_planes - (batch_size - 1) <= 0
+
+        processed = bf.get_processed_planes()
+        assert processed.shape[1:] == planes.shape[1:]
+        n_gotten = processed.shape[0]
+    else:
+        assert remaining_planes - (batch_size - 1) > 0
+
+    if bf.flush():
+        assert remaining_planes
+
+        assert bf.volume.shape[0] >= kernel_size
+        assert bf.inside_brain_tiles.shape[0] >= kernel_size
+
+        processed = bf.get_processed_planes()
+        assert processed.shape[1:] == planes.shape[1:]
+        n_gotten += processed.shape[0]
+    else:
+        assert not remaining_planes
+
+    assert bf.ready
+    assert n_gotten == batch_size
 
 
 @pytest.mark.parametrize(
@@ -91,7 +133,7 @@ def test_filtered_planes(kernel_size, batch_size):
     total_planes = n_batches * batch_size
     sent_planes = 0
     gotten_planes = 0
-    num_padded_planes = kernel_size - 1
+    num_padded_planes = kernel_size - (kernel_size // 2 + 1)
 
     h, w = kwargs["plane_height"], kwargs["plane_width"]
     data = torch.arange(total_planes * h * w).reshape((total_planes, h, w))
@@ -116,23 +158,28 @@ def test_filtered_planes(kernel_size, batch_size):
             planes = bf.get_processed_planes()
             raw_planes = bf.get_raw_planes()
             all_raw_planes.extend(raw_planes)
-            # first batch is 1 or batch minus padding. Remaining is batch size
-            assert planes.shape[0] in (
-                1,
-                batch_size,
-                batch_size - num_padded_planes,
-            )
-            assert len(raw_planes) == planes.shape[0]
 
+            assert len(raw_planes) == planes.shape[0]
             for raw_plane in raw_planes:
                 assert raw_plane.shape == planes.shape[1:]
 
             gotten_planes += planes.shape[0]
 
     assert gotten_planes == sent_planes - num_padded_planes
-    all_raw_planes_np = np.stack(all_raw_planes, axis=0)
-    p1 = bf.first_valid_plane
-    data_np_unpadded = data_np[p1 : total_planes - (num_padded_planes - p1)]
 
-    assert data_np_unpadded.shape == all_raw_planes_np.shape
-    assert np.array_equal(data_np_unpadded, all_raw_planes_np)
+    if gotten_planes < sent_planes:
+        assert bf.flush()
+
+        planes = bf.get_processed_planes()
+        raw_planes = bf.get_raw_planes()
+        all_raw_planes.extend(raw_planes)
+
+        assert len(raw_planes) == planes.shape[0]
+        for raw_plane in raw_planes:
+            assert raw_plane.shape == planes.shape[1:]
+
+        gotten_planes += planes.shape[0]
+        assert gotten_planes == sent_planes
+        assert len(all_raw_planes) == sent_planes
+    else:
+        assert not bf.flush()

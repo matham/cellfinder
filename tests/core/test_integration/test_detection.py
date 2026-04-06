@@ -165,11 +165,7 @@ def test_callbacks(signal_array, background_array, no_free_cpus):
         ball_z_size=15,
     )
 
-    skipped_planes = int(round(15 / voxel_sizes[0])) - 1
-    skip_start = skipped_planes // 2
-    skip_end = skipped_planes - skip_start
-    n = len(signal_array) - skip_end
-    np.testing.assert_equal(planes_done, np.arange(skip_start, n))
+    np.testing.assert_equal(planes_done, np.arange(len(signal_array)))
     np.testing.assert_equal(batches_classified, [0])
 
     ncalls = len(points_found)
@@ -359,7 +355,7 @@ def test_center_of_intensity_comet_spot(
         background_array,
         soma_diameter=8,
         ball_xy_size=8,
-        ball_z_size=8,
+        ball_z_size=3,
         ball_overlap_fraction=0.7,
         log_sigma_size=0.8,
         n_sds_above_mean_thresh=0,
@@ -448,3 +444,28 @@ def synthetic_center_of_intensity_linear_intensity_comet_spot(
     assert abs(x - cell.x) <= grace
     assert abs(y - cell.y) <= 1
     assert abs(z - cell.z) <= 1
+
+
+@pytest.mark.parametrize("tile_threshold,tile_size", [(0, 2), (1, 2), (1, 4)])
+def test_threshold_tiling(
+    synthetic_single_spot_smooth, tile_threshold, tile_size
+):
+    signal, _, c_xyz = synthetic_single_spot_smooth
+    detected = detect_main(
+        signal.astype(np.uint16),
+        voxel_sizes=(1, 1, 1),
+        soma_diameter=8,
+        ball_xy_size=1,
+        ball_z_size=1,
+        log_sigma_size=0.2,
+        ball_overlap_fraction=0.6,
+        n_sds_above_mean_thresh=0.5,
+        soma_spread_factor=5,
+        n_sds_above_mean_tiled_thresh=tile_threshold,
+        tiled_thresh_tile_size=tile_size,
+    )
+
+    assert len(detected) == 1
+    (cell,) = detected
+    for actual, expected in zip((cell.x, cell.y, cell.z), c_xyz):
+        assert abs(actual - expected) <= 1

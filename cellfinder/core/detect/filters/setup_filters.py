@@ -88,7 +88,7 @@ class DetectionSettings:
     """
     Cell spread factor for determining the largest cell volume before
     splitting up cell clusters. Structures with spherical volume of
-    diameter `soma_spread_factor * soma_diameter` or less will not be
+    diameter `soma_spread_factor * average_soma_diameter` or less will not be
     split.
     """
 
@@ -358,7 +358,7 @@ class DetectionSettings:
         The height of each tile of the tiled input image, used during filtering
         to mark individual tiles as inside/outside the brain.
         """
-        return self.soma_diameter * 2
+        return self.soma_diameter_plane * 2
 
     @property
     def tile_width(self) -> int:
@@ -366,7 +366,7 @@ class DetectionSettings:
         The width of each tile of the tiled input image, used during filtering
         to mark individual tiles as inside/outside the brain.
         """
-        return self.soma_diameter * 2
+        return self.soma_diameter_plane * 2
 
     @property
     def plane_height(self) -> int:
@@ -406,16 +406,21 @@ class DetectionSettings:
         n = min(n, self.n_processes)
         return min(n, MAX_TORCH_COMP_THREADS)
 
-    @property
+    @cached_property
     def in_plane_pixel_size(self) -> float:
         """Returns the average in-plane (xy) um/pixel."""
         voxel_sizes = self.voxel_sizes
         return (voxel_sizes[2] + voxel_sizes[1]) / 2
 
     @cached_property
-    def soma_diameter(self) -> int:
+    def soma_diameter_plane(self) -> int:
         """The `soma_diameter_um`, but in voxels."""
         return int(round(self.soma_diameter_um / self.in_plane_pixel_size))
+
+    @cached_property
+    def soma_diameter_axial(self) -> int:
+        """The `soma_diameter_um`, but in voxels in axial axis."""
+        return int(round(self.soma_diameter_um / self.voxel_sizes[0]))
 
     @cached_property
     def max_cluster_size(self) -> int:
@@ -462,7 +467,9 @@ class DetectionSettings:
 
         If we find a bright area larger than that, we will split it.
         """
-        radius = self.soma_spread_factor * self.soma_diameter / 2
+        dia = (self.soma_diameter_plane * 2 + self.soma_diameter_axial) / 3
+        radius = self.soma_spread_factor * dia / 2
+
         return (4 / 3) * math.pi * radius**3
 
     @property

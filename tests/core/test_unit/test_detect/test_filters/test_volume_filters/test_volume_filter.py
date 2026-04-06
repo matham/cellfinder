@@ -72,7 +72,7 @@ def test_2d_filter_cell_detection_thread_exception(mocker: MockerFixture):
     )
 
     mocker.patch.object(
-        VolumeFilter, "_run_filter_thread", new=raise_exception
+        VolumeFilter, "_run_cell_detection_thread", new=raise_exception
     )
     run_main_assert_exception()
 
@@ -95,7 +95,7 @@ def test_feeder_thread_batch(batch_size: int):
     # checks various batch sizes to see if there are issues
     # this also tests a batch size of 3 but 5 planes. So the feeder thread
     # will feed us a batch of 3 and a batch of 2. It tests that filters can
-    # handle unequal batch sizes
+    # handle unequal batch sizes and that we get same number of planes as input
     planes = []
 
     def callback(z):
@@ -108,12 +108,12 @@ def test_feeder_thread_batch(batch_size: int):
         callback=callback,
     )
 
-    assert planes == list(range(1, 4))
+    assert planes == list(range(5))
 
 
 def test_not_enough_planes():
-    # checks that even if there are not enough planes for volume filtering, it
-    # doesn't raise errors or gets stuck
+    # checks that even if there are not enough planes for full kernel volume
+    # filtering, it doesn't raise errors or gets stuck and handles those fed
     planes = []
 
     def callback(z):
@@ -125,7 +125,7 @@ def test_not_enough_planes():
         callback=callback,
     )
 
-    assert not planes
+    assert planes == [0, 1]
 
 
 def test_filtered_plane_range(mocker: MockerFixture):
@@ -162,13 +162,8 @@ def test_saving_filtered_planes(tmp_path):
 
     files = [p.name for p in path.iterdir() if p.is_file()]
     # we're skipping first and last plane that isn't filtered due to kernel
-    assert len(files) == 4
-    assert set(files) == {
-        "plane_0002.tif",
-        "plane_0003.tif",
-        "plane_0004.tif",
-        "plane_0005.tif",
-    }
+    assert len(files) == 6
+    assert set(files) == {f"plane_000{i}.tif" for i in range(1, 7)}
 
 
 def test_saving_filtered_planes_no_dir():
@@ -250,7 +245,14 @@ def test_3d_filtering(
         batch_size=1,
     )
 
+    ball_z_voxels = int(round(15 / voxel_sizes[0]))
+    start = ball_z_voxels // 2
+    end = ball_z_voxels - start - 1
+
     filtered_our = np.asarray(read_with_dask(str(path)))
+    n = filtered_our.shape[0]
+    filtered_our = filtered_our[start : n - end]
+
     assert filtered_our.shape == filtered.shape
     assert filtered_our.dtype == np.uint16
     # we need to rescale our data because the original data saved to uint32

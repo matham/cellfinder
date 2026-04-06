@@ -21,6 +21,9 @@ from cellfinder.core.detect.filters.volume.structure_splitting import (
     StructureSplitException,
     split_cells,
 )
+from cellfinder.core.detect.filters.volume.threshold_filter import (
+    ThresholdFilter3D,
+)
 from cellfinder.core.tools.threading import (
     EOFSignal,
     ProcessWithException,
@@ -28,13 +31,15 @@ from cellfinder.core.tools.threading import (
 )
 from cellfinder.core.tools.tools import inference_wrapper
 
+_done_signal = "is_done"
+
 
 @inference_wrapper
 def _plane_filter(
     process: ProcessWithException,
     tile_processor: TileProcessor,
     n_threads: int,
-    buffers: List[Tuple[torch.Tensor, torch.Tensor]],
+    buffers: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]],
 ):
     """
     When running on cpu, we spin up a process for each plane in the batch.
@@ -54,11 +59,15 @@ def _plane_filter(
         # with torch multiprocessing, tensors are shared in memory - so
         # just update in place
         token, i = msg
-        tensor, masks = buffers[token]
+        tensor, masks, enhanced_buffer = buffers[token]
 
-        plane, mask = tile_processor.get_tile_mask(tensor[i : i + 1, :, :])
+        plane, mask, enhanced_planes = tile_processor.get_tile_mask(
+            tensor[i : i + 1, :, :]
+        )
         tensor[i : i + 1, :, :] = plane
         masks[i : i + 1, :, :] = mask
+        if enhanced_buffer is not None:
+            enhanced_buffer[i : i + 1, :, :] = enhanced_planes
 
         # tell the main thread we processed all the planes for this tensor
         process.send_msg_to_mainthread(None)
@@ -79,8 +88,28 @@ class VolumeFilter:
         Settings object that contains all the configuration data.
     """
 
+    threshold_filter: ThresholdFilter3D | None = None
+
     def __init__(self, settings: DetectionSettings):
         self.settings = settings
+
+        tile_size = settings.tiled_thresh_tile_size
+        if tile_size:
+            self.threshold_filter = ThresholdFilter3D(
+                plane_height=settings.plane_height,
+                plane_width=settings.plane_width,
+                tile_xy_size=int(
+                    round(tile_size * settings.soma_diameter_plane)
+                ),
+                tile_z_size=int(
+                    round(tile_size * settings.soma_diameter_axial)
+                ),
+                n_sds_above_mean_thresh=self.settings.n_sds_above_mean_tiled_thresh,
+                threshold_value=settings.threshold_value,
+                dtype=settings.filtering_dtype.__name__,
+                batch_size=settings.batch_size,
+                torch_device=settings.torch_device,
+            )
 
         self.ball_filter = BallFilter(
             plane_height=settings.plane_height,
@@ -98,7 +127,7 @@ class VolumeFilter:
             use_mask=True,
         )
 
-        self.z = settings.start_plane + self.ball_filter.first_valid_plane
+        self.z = settings.start_plane
 
         self.cell_detector = CellDetector(
             settings.plane_height,
@@ -114,9 +143,15 @@ class VolumeFilter:
             self.ball_filter.num_batches_before_ready,
         )
 
+        if self.threshold_filter is not None:
+            self.n_queue_buffer = max(
+                self.n_queue_buffer,
+                self.threshold_filter.num_batches_before_ready,
+            )
+
     def _get_filter_buffers(
         self, cpu: bool, tile_processor: TileProcessor
-    ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]]:
         """
         Generates buffers to use for data loading and filtering.
 
@@ -144,14 +179,20 @@ class VolumeFilter:
                 device="cpu",
             )
 
-            # tile mask buffer - only for cpu
+            # tile mask and enhanced plane buffer - only for cpu because we use
+            # second process to copy data into them. For gpu we get the buffers
+            # directly from the functions that create then
             masks = None
+            # additionally, enhanced is only sent if using threshold filter
+            enhanced_planes = None
             if cpu:
                 masks = tile_processor.get_tiled_buffer(
                     batch_size, self.settings.torch_device
                 )
+                if self.threshold_filter is not None:
+                    enhanced_planes = torch.empty_like(tensor)
 
-            buffers.append((tensor, masks))
+            buffers.append((tensor, masks, enhanced_planes))
 
         return buffers
 
@@ -161,7 +202,7 @@ class VolumeFilter:
         thread: ThreadWithException,
         data: types.array,
         processors: List[ProcessWithException],
-        buffers: List[Tuple[torch.Tensor, torch.Tensor]],
+        buffers: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]],
     ) -> None:
         """
         Runs in its own thread. It loads the input data planes, converts them
@@ -195,8 +236,8 @@ class VolumeFilter:
             if token is EOFSignal:
                 return
 
-            # buffer is free, get it from its token
-            tensor, masks = buffers[token]
+            # buffer is free, get it from token
+            tensor, masks, enhanced = buffers[token]
 
             # for last batch, it can be smaller than normal so only set up to n
             tensor[:n, :, :] = torch.from_numpy(np_data)
@@ -222,14 +263,17 @@ class VolumeFilter:
                     process.send_msg_to_thread((token, i))
 
             # tell the main thread to wait for processors (if used)
-            msg = token, np_data, tensor, masks, used_processors, n
+            msg = token, np_data, tensor, masks, enhanced, used_processors, n
 
             if n < batch_size:
                 # on last batch, we are also done after this
                 thread.send_msg_to_mainthread(msg)
+                thread.send_msg_to_mainthread(_done_signal)
                 return
             # send the data to the main thread
             thread.send_msg_to_mainthread(msg)
+
+        thread.send_msg_to_mainthread(_done_signal)
 
     def process(
         self,
@@ -281,7 +325,7 @@ class VolumeFilter:
 
         # thread that takes the 3d filtered data and does cell detection
         cells_thread = ThreadWithException(
-            target=self._run_filter_thread,
+            target=self._run_cell_detection_thread,
             args=(callback, progress_bar),
             pass_self=True,
         )
@@ -326,60 +370,148 @@ class VolumeFilter:
         for cell detection.
         """
         processing_tokens = []
+        bf = self.ball_filter
+        tf = self.threshold_filter
+
 
         while True:
             # thread/underlying queues get first crack at msg. Unless we get
             # eof, this will block until we get more loaded data until no more
             # data or exception
             msg = feed_thread.get_msg_from_thread()
-            # feeder thread exits at the end, causing a eof to be sent
+            # feeder thread exits at the end, causing an eof to be sent
             if msg is EOFSignal:
                 break
-            token, np_data, tensor, masks, used_processors, n = msg
-            # this token is in use until we return it, meaning tensor is in use
-            processing_tokens.append(token)
 
-            if cpu:
-                # we did 2d filtering in different process. Make sure all the
-                # planes in the tensor/masks are done filtering. Each msg from
-                # feeder thread has corresponding msg for each used processor
-                # (unless exception), which corresponds to a plane
-                for process in used_processors:
-                    process.get_msg_from_thread()
-                planes = tensor
-            else:
-                # we're not doing 2d filtering in different process
-                planes, masks = tile_processor.get_tile_mask(tensor)
+            # if feeder thread has no more data, process remaining data already
+            # waiting in tf/bf
+            if msg == _done_signal:
+                # check tf has no waiting data by flushing it, if there weren't
+                # any new tf data, process remaining bf data and exit
+                if tf is None or not tf.flush():
+                    if bf.flush():
+                        assert bf.ready
+                        self._send_ball_filter_result_to_cell_detector(
+                            feed_thread, cells_thread, processing_tokens
+                        )
+                    return
 
-            self.ball_filter.append(planes, masks, np_data)
-            if self.ball_filter.ready:
-                self.ball_filter.walk()
-                middle_planes = self.ball_filter.get_processed_planes()
-                # we always include the raw planes, even if we don't use it
-                raw_planes = self.ball_filter.get_raw_planes()
+                # else, need to finish processing flushed tf data first. If
+                # flush returned true, no need to check if ready
+                assert tf.ready
+                tf.walk()
+                planes = tf.get_processed_planes()
+                raw_data, masks = tf.get_processed_side_data_planes()
+                bf.append(planes, masks, raw_data)
+                # first finish (newly) ready bf data, return if detector asks
+                if not self._send_ball_filter_result_to_cell_detector(
+                    feed_thread, cells_thread, processing_tokens
+                ):
+                    return
 
-                # at this point we know input tensor can be reused - return
-                # it so feeder thread can load more data into it
-                for token in processing_tokens:
-                    feed_thread.send_msg_to_thread(token)
-                processing_tokens.clear()
+                # flush bf and process flushed data and exit
+                if bf.flush():
+                    assert bf.ready
+                    self._send_ball_filter_result_to_cell_detector(
+                        feed_thread, cells_thread, processing_tokens
+                    )
+                return
 
-                # thread/underlying queues get first crack at msg. Unless
-                # we get eof, this will block until we get a token,
-                # indicating we can send more data. The cells thread has a
-                # fixed token supply, ensuring we don't send it too much
-                # data, in case detection takes longer than filtering
-                # Also, error messages incoming are at most # tokens behind
-                token = cells_thread.get_msg_from_thread()
-                if token is EOFSignal:
-                    break
-                # send it more data and return the token
-                cells_thread.send_msg_to_thread(
-                    (middle_planes, raw_planes, token)
-                )
+            # normal operation, msg is new 2d filtered data
+            raw_data, planes, masks, enhanced = self._unpack_feeder_thread_msg(
+                msg, processing_tokens, cpu, tile_processor
+            )
+            if tf is not None:
+                # pass through tf if using
+                tf.append(enhanced, planes, raw_data, masks)
+                if not tf.ready:
+                    # wait for more data before we can use any tf results
+                    continue
+
+                # it's ready to pass on to bf
+                tf.walk()
+                planes = tf.get_processed_planes()
+                raw_data, masks = tf.get_processed_side_data_planes()
+
+            bf.append(planes, masks, raw_data)
+            # process bf data if ready and exit if detector asked
+            if not self._send_ball_filter_result_to_cell_detector(
+                feed_thread, cells_thread, processing_tokens
+            ):
+                return
+
+    def _unpack_feeder_thread_msg(
+        self,
+        msg: tuple[
+            int,
+            np.ndarray,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor | None,
+            List[ProcessWithException],
+            int,
+        ],
+        processing_tokens: list[int],
+        cpu: bool,
+        tile_processor: TileProcessor,
+    ) -> tuple[np.ndarray, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        token, np_data, tensor, masks, enhanced, used_processors, n = msg
+        # this token is in use until we return it
+        processing_tokens.append(token)
+
+        if cpu:
+            # we did 2d filtering in different process. Make sure all
+            # the planes are done filtering. Each msg from feeder
+            # thread has corresponding msg for each used processor
+            # (unless exception)
+            for process in used_processors:
+                process.get_msg_from_thread()
+            # batch size can change at the end so resize buffer
+            planes = tensor[:n, :, :]
+            masks = masks[:n, :, :]
+            if enhanced is not None:
+                enhanced = enhanced[:n, :, :]
+        else:
+            # we're not doing 2d filtering in different process
+            planes, masks, enhanced = tile_processor.get_tile_mask(tensor)
+
+        return np_data, planes, masks, enhanced
+
+    def _send_ball_filter_result_to_cell_detector(
+        self,
+        feed_thread: ThreadWithException,
+        cells_thread: ThreadWithException,
+        processing_tokens: list[int],
+    ) -> bool:
+        if not self.ball_filter.ready:
+            return True
+
+        self.ball_filter.walk()
+        middle_planes = self.ball_filter.get_processed_planes()
+        raw_planes = self.ball_filter.get_raw_planes()
+
+        # at this point we know input tensor can be reused - return
+        # it so feeder thread can load more data into it
+        for token in processing_tokens:
+            feed_thread.send_msg_to_thread(token)
+        processing_tokens.clear()
+
+        # thread/underlying queues get first crack at msg. Unless
+        # we get eof, this will block until we get a token,
+        # indicating we can send more data. The cells thread has a
+        # fixed token supply, ensuring we don't send it too much
+        # data, in case detection takes longer than filtering
+        # Also, error messages incoming are at most # tokens behind
+        token = cells_thread.get_msg_from_thread()
+        if token is EOFSignal:
+            return False
+        # send it more data and return the token
+        cells_thread.send_msg_to_thread((middle_planes, raw_planes, token))
+
+        return True
 
     @inference_wrapper
-    def _run_filter_thread(
+    def _run_cell_detection_thread(
         self, thread: ThreadWithException, callback, progress_bar
     ) -> None:
         """
@@ -391,11 +523,6 @@ class VolumeFilter:
         detection_converter = self.settings.detection_data_converter_func
         save_planes = self.settings.save_planes
         previous_plane = None
-        bf = self.ball_filter
-
-        # these many planes are not processed at start because 3d filter uses
-        # it as padding at the start of filter
-        progress_bar.update(bf.first_valid_plane)
 
         # main thread needs a token to send us planes - populate with some
         for _ in range(self.n_queue_buffer):
@@ -408,9 +535,6 @@ class VolumeFilter:
             # requested that we return. This can mean the main thread finished
             # sending data and it appended eof - so we get eof after all planes
             if msg is EOFSignal:
-                # these many planes are not processed at the end because 3d
-                # filter uses it as padding at the end of the filter
-                progress_bar.update(bf.remaining_planes)
                 return
 
             # convert plane to the type needed by detection system
