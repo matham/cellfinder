@@ -236,7 +236,7 @@ class DebugInputs(InputContainer):
     bottom_corner: tuple[int, int] = 0, 0
     top_corner: tuple[int, int] = 0, 0
     start_gen_from: DetectionStage = DetectionStage.input
-    end_gen_on: DetectionStage = DetectionStage.splitting
+    end_gen_on: DetectionStage = DetectionStage.struct_splitting
     local_store: Path = Path.home()
     gen_dir: str = ""
 

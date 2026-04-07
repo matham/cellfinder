@@ -1,11 +1,12 @@
 import dataclasses
 import math
 import multiprocessing as mp
+from queue import Empty
 import pickle
 from enum import IntEnum, auto
-from functools import cached_property, partial
+from functools import cached_property, partial, wraps
 from pathlib import Path
-from typing import Callable, Type
+from typing import Callable, Type, Optional, Sequence
 
 import numpy as np
 import tifffile
@@ -17,9 +18,11 @@ from brainglobe_utils.IO.image.load import read_z_stack
 from brainglobe_utils.IO.yaml import save_yaml
 
 from cellfinder.core import types
+from cellfinder.core.tools.threading import ThreadWithException, EOFSignal
 from cellfinder.core.detect.filters.plane import TileProcessor
 from cellfinder.core.detect.filters.setup_filters import DetectionSettings
 from cellfinder.core.detect.filters.volume.ball_filter import BallFilter
+from cellfinder.core.detect.filters.volume.threshold_filter import ThresholdFilter3D
 from cellfinder.core.detect.filters.volume.structure_detection import (
     CellDetector,
     get_structure_centre,
@@ -31,14 +34,309 @@ from cellfinder.core.detect.filters.volume.structure_splitting import (
 from cellfinder.core.tools.tools import inference_wrapper
 
 
+def thread_run(thread: ThreadWithException):
+    while True:
+        # if the main thread wants us to exit, it'll wake us up
+        msg = thread.get_msg_from_mainthread()
+        # we were asked to exit
+        if msg == EOFSignal:
+            return
+
+        f, obj, args, kwargs = msg
+        f(obj, *args, **kwargs)
+
+
+def run_in_thread(func) -> Callable:
+    @wraps(func)
+    def inner(obj, *args, **kwargs):
+        thread: ThreadWithException | None = getattr(obj, "thread_runner", None)
+        if thread is None:
+            func(obj, *args, **kwargs)
+        else:
+            thread.send_msg_to_thread((func, obj, args, kwargs))
+
+    return inner
+
+
 class DetectionStage(IntEnum):
 
     input = auto()
     clipped = auto()
-    enhanced = auto()
-    filtered_2d = auto()
-    filtered_3d = auto()
-    splitting = auto()
+    peak_enhanced = auto()
+    bin_2d_peaks = auto()
+    bin_3d_peaks = auto()
+    filtered_3d_ball = auto()
+    structs_detection = auto()
+    struct_typed = auto()
+    struct_splitting = auto()
+
+
+class DataStore:
+
+    settings: DetectionSettings
+
+    input_data: types.array | None = None
+
+    clipped_data: types.array | None = None
+
+    peak_enhanced_data: types.array | None = None
+
+    inside_data: types.array | None = None
+
+    bin_2d_peaks_data: types.array | None = None
+
+    bin_3d_peaks_data: types.array | None = None
+
+    filtered_3d_ball_data: types.array | None = None
+
+    current_batch: int = 0
+
+    _input_batch: tuple[torch.Tensor, np.ndarray] | None = None
+
+    _clipped_batch: torch.Tensor | None = None
+
+    _peak_enhanced_batch: torch.Tensor | None = None
+
+    _inside_batch: torch.Tensor | None = None
+
+    _bin_2d_peaks_batch: torch.Tensor | None = None
+
+    _bin_3d_peaks_batch: tuple[list[torch.Tensor], list[np.ndarray], list[torch.Tensor]] | None = None
+
+    _filtered_3d_ball_batch: tuple[np.ndarray, list[np.ndarray]] | None = None
+
+    def __init__(
+        self, detection: "DetectionDebug",
+        local_store_loader: Optional["DetectionDebug"],
+        start_gen_from: DetectionStage,
+        end_gen_on: DetectionStage,
+        start_plane: int = 0,
+        end_plane: int = 0,
+        bottom_corner: tuple[int, int] = (0, 0),
+        top_corner: tuple[int, int] = (0, 0),
+    ):
+        self.settings = detection.settings
+        self.detection = detection
+        self.lsl = local_store_loader
+        self.start_gen_from = start_gen_from
+        self.end_gen_on = end_gen_on
+        self.start_plane = start_plane
+        self.end_plane = end_plane
+        self.bottom_corner = bottom_corner
+        self.top_corner = top_corner
+
+    def crop_image_if_needed(self, data: types.array) -> types.array:
+        bot_y, bot_x = self.bottom_corner
+        top_y, top_x = self.top_corner
+
+        start_plane = max(self.start_plane, 0)
+        bot_y = max(bot_y, 0)
+        bot_x = max(bot_x, 0)
+
+        end_plane = self.end_plane
+        if end_plane <= 0:
+            end_plane = data.shape[0]
+        if top_y <= 0:
+            top_y = data.shape[1]
+        if top_x <= 0:
+            top_x = data.shape[2]
+
+        return data[start_plane:end_plane, bot_y:top_y, bot_x:top_x]
+
+    def _load_stack(self, prefix: str) -> types.array:
+        lsl = self.lsl
+        if lsl is None:
+            data = self.detection.get_image(local_prefix=prefix)
+        else:
+            data = self.detection.get_image(
+                arr_or_path=getattr(lsl, f"{prefix}_image_path")
+            )
+        return self.crop_image_if_needed(data)
+
+    def reset(self) -> None:
+        self.input_data = None
+        self.clipped_data = None
+        self.peak_enhanced_data = None
+        self.inside_data = None
+        self.bin_2d_peaks_data = None
+        self.bin_3d_peaks_data = None
+        self.filtered_3d_ball_data = None
+
+        self._input_batch = None
+        self._clipped_batch = None
+        self._peak_enhanced_batch = None
+        self._inside_batch = None
+        self._bin_2d_peaks_batch = None
+        self._bin_3d_peaks_batch = None
+        self._filtered_3d_ball_batch = None
+
+    def set_current_batch(self, batch: int) -> None:
+        self.current_batch = batch
+        self._input_batch = None
+        self._clipped_batch = None
+        self._peak_enhanced_batch = None
+        self._inside_batch = None
+        self._bin_2d_peaks_batch = None
+        self._bin_3d_peaks_batch = None
+        self._filtered_3d_ball_batch = None
+
+    @property
+    def input_batch(self) -> tuple[torch.Tensor, np.ndarray]:
+        if self._input_batch is not None:
+            return self._input_batch
+
+        if self.input_data is None:
+            self.input_data = self._load_stack("input")
+
+        batch_size = self.detection.batch_size
+        i = self.current_batch
+
+        batch_np = np.asarray(self.input_data[i: i + batch_size]).astype(
+            self.settings.plane_original_np_dtype
+        )
+        batch_np = self.settings.filter_data_converter_func(batch_np)
+        batch_torch = torch.from_numpy(batch_np).to(self.detection.torch_device)
+
+        return batch_torch, batch_np
+
+    @input_batch.setter
+    def input_batch(self, value: tuple[torch.Tensor, np.ndarray]) -> None:
+        self._input_batch = value
+
+    @property
+    def clipped_input_batch(self) -> torch.Tensor:
+        if self._clipped_batch is not None:
+            return self._clipped_batch
+
+        if self.clipped_data is None:
+            self.clipped_data = self._load_stack("clipped_input")
+
+        batch_size = self.detection.batch_size
+        i = self.current_batch
+
+        batch_clipped = self.clipped_data[i: i + batch_size]
+        batch_clipped = np.asarray(
+            batch_clipped, dtype=self.settings.filtering_dtype
+        )
+        batch_clipped = torch.from_numpy(batch_clipped).to(
+            self.detection.torch_device
+        )
+        return batch_clipped
+
+    @clipped_input_batch.setter
+    def clipped_input_batch(self, value: torch.Tensor) -> None:
+        self._clipped_batch = value
+
+    @property
+    def peak_enhanced_batch(self) -> torch.Tensor:
+        if self._peak_enhanced_batch is not None:
+            return self._peak_enhanced_batch
+
+        if self.peak_enhanced_data is None:
+            self.peak_enhanced_data = self._load_stack("peak_enhanced")
+
+        batch_size = self.detection.batch_size
+        i = self.current_batch
+
+        enhanced_planes = self.peak_enhanced_data[i: i + batch_size]
+        enhanced_planes = np.asarray(
+            enhanced_planes, dtype=self.settings.filtering_dtype
+        )
+        enhanced_planes = torch.from_numpy(enhanced_planes).to(
+            self.detection.torch_device
+        )
+        return enhanced_planes
+
+    @peak_enhanced_batch.setter
+    def peak_enhanced_batch(self, value: torch.Tensor) -> None:
+        self._peak_enhanced_batch = value
+
+    @property
+    def inside_batch(self) -> torch.Tensor:
+        if self._inside_batch is not None:
+            return self._inside_batch
+
+        if self.inside_data is None:
+            self.inside_data = self._load_stack("inside_brain")
+
+        batch_size = self.detection.batch_size
+        i = self.current_batch
+
+        inside_brain_tiles = self.inside_data[i: i + batch_size]
+        inside_brain_tiles = np.asarray(inside_brain_tiles, dtype=bool)
+        inside_brain_tiles = torch.from_numpy(inside_brain_tiles).to(
+            self.detection.torch_device
+        )
+        return inside_brain_tiles
+
+    @inside_batch.setter
+    def inside_batch(self, value: torch.Tensor) -> None:
+        self._inside_batch = value
+
+    @property
+    def bin_2d_peaks_batch(self) -> torch.Tensor:
+        if self._bin_2d_peaks_batch is not None:
+            return self._bin_2d_peaks_batch
+
+        if self.bin_2d_peaks_data is None:
+            self.bin_2d_peaks_data = self._load_stack("bin_2d_peaks")
+
+        batch_size = self.detection.batch_size
+        i = self.current_batch
+
+        bin_2d_peaks = self.bin_2d_peaks_data[i: i + batch_size]
+        bin_2d_peaks = np.asarray(
+            bin_2d_peaks
+        )
+        bin_2d_peaks = torch.from_numpy(bin_2d_peaks).to(self.detection.torch_device)
+        return bin_2d_peaks
+
+    @bin_2d_peaks_batch.setter
+    def bin_2d_peaks_batch(self, value: torch.Tensor) -> None:
+        self._bin_2d_peaks_batch = value
+
+    @property
+    def bin_3d_peaks_batch(self) -> tuple[list[torch.Tensor], list[np.ndarray], list[torch.Tensor]]:
+        if self._bin_3d_peaks_batch is not None:
+            return self._bin_3d_peaks_batch
+
+        if self.bin_3d_peaks_data is None:
+            self.bin_3d_peaks_data = self._load_stack("bin_3d_peaks")
+
+        batch_size = self.detection.batch_size
+        i = self.current_batch
+
+        bin_3d_peaks = self.bin_3d_peaks_data[i: i + batch_size]
+        bin_3d_peaks = np.asarray(
+            bin_3d_peaks
+        )
+        bin_3d_peaks = torch.from_numpy(bin_3d_peaks).to(self.detection.torch_device)
+        return list(bin_3d_peaks), list(self.input_batch[1]), list(self.inside_batch)
+
+    @bin_3d_peaks_batch.setter
+    def bin_3d_peaks_batch(self, value: tuple[list[torch.Tensor], list[np.ndarray], list[torch.Tensor]]) -> None:
+        self._bin_3d_peaks_batch = value
+
+    @property
+    def filtered_3d_ball_batch(self) -> tuple[np.ndarray, list[np.ndarray]]:
+        if self._filtered_3d_ball_batch is not None:
+            return self._filtered_3d_ball_batch
+
+        if self.filtered_3d_ball_data is None:
+            self.filtered_3d_ball_data = self._load_stack("filtered_3d_ball")
+
+        batch_size = self.detection.batch_size
+        i = self.current_batch
+
+        filtered_3d_ball = self.filtered_3d_ball_data[i: i + batch_size]
+        filtered_3d_ball = np.asarray(
+            filtered_3d_ball
+        )
+        return filtered_3d_ball, list(self.input_batch[1])
+
+    @filtered_3d_ball_batch.setter
+    def filtered_3d_ball_batch(self, value: tuple[np.ndarray, list[np.ndarray]]) -> None:
+        self._filtered_3d_ball_batch = value
 
 
 class DetectionDebug:
@@ -50,13 +348,9 @@ class DetectionDebug:
 
     input_settings: dict
 
-    signal_array: types.array | None = None
+    data_store: DataStore | None = None
 
-    clipped_data: types.array | None = None
-
-    inside_data: types.array | None = None
-
-    filtered_2d_data: types.array | None = None
+    thread_runner: ThreadWithException | None = None
 
     def __init__(
         self,
@@ -153,27 +447,31 @@ class DetectionDebug:
 
     @property
     def clipped_input_image_path(self) -> Path:
-        return self.local_store / "clipped"
+        return self.local_store / "clipped_input"
 
     @property
-    def enhanced_image_path(self) -> Path:
-        return self.local_store / "enhanced"
+    def peak_enhanced_image_path(self) -> Path:
+        return self.local_store / "peak_enhanced"
 
     @property
     def inside_brain_image_path(self) -> Path:
         return self.local_store / "inside_brain"
 
     @property
-    def filtered_2d_image_path(self) -> Path:
-        return self.local_store / "filtered_2d"
+    def bin_2d_peaks_image_path(self) -> Path:
+        return self.local_store / "bin_2d_peaks"
 
     @property
-    def filtered_3d_image_path(self) -> Path:
-        return self.local_store / "filtered_3d"
+    def bin_3d_peaks_image_path(self) -> Path:
+        return self.local_store / "bin_3d_peaks"
+
+    @property
+    def filtered_3d_ball_image_path(self) -> Path:
+        return self.local_store / "filtered_3d_ball"
 
     @property
     def structs_id_image_path(self) -> Path:
-        return self.local_store / "struct_id"
+        return self.local_store / "structs_id"
 
     @property
     def struct_type_image_path(self) -> Path:
@@ -195,9 +493,7 @@ class DetectionDebug:
             clipping_value=settings.clipping_value,
             threshold_value=settings.threshold_value,
             n_sds_above_mean_thresh=settings.n_sds_above_mean_thresh,
-            n_sds_above_mean_tiled_thresh=settings.n_sds_above_mean_tiled_thresh,
-            tiled_thresh_tile_size=settings.tiled_thresh_tile_size,
-            soma_diameter=settings.soma_diameter,
+            soma_diameter=settings.soma_diameter_plane,
             log_sigma_size=settings.log_sigma_size,
             torch_device=self.torch_device,
             dtype=settings.filtering_dtype.__name__,
@@ -224,12 +520,35 @@ class DetectionDebug:
         )
 
     @cached_property
+    def threshold_filter(self) -> ThresholdFilter3D | None:
+        settings = self.settings
+        tile_size = settings.tiled_thresh_tile_size
+        if not tile_size:
+            return None
+
+        return ThresholdFilter3D(
+            plane_height=settings.plane_height,
+            plane_width=settings.plane_width,
+            tile_xy_size=int(
+                round(tile_size * settings.soma_diameter_plane)
+            ),
+            tile_z_size=int(
+                round(tile_size * settings.soma_diameter_axial)
+            ),
+            n_sds_above_mean_thresh=self.settings.n_sds_above_mean_tiled_thresh,
+            threshold_value=settings.threshold_value,
+            dtype=settings.filtering_dtype.__name__,
+            batch_size=settings.batch_size,
+            torch_device=settings.torch_device,
+        )
+
+    @cached_property
     def cell_detector(self) -> CellDetector:
         settings = self.settings
         return CellDetector(
             settings.plane_height,
             settings.plane_width,
-            start_z=self.ball_filter.first_valid_plane,
+            0,
             soma_centre_value=settings.detection_soma_centre_value,
         )
 
@@ -251,63 +570,34 @@ class DetectionDebug:
         )
         return crop
 
+    @run_in_thread
     def save_tiffs(
         self,
         prefix: str,
         start_index: int,
-        buffer: torch.Tensor | np.ndarray,
-    ):
+        buffer: torch.Tensor | np.ndarray | Sequence[torch.Tensor | np.ndarray],
+    ) -> None:
         root = self.local_store / prefix
         root.mkdir(parents=True, exist_ok=True)
 
         if isinstance(buffer, torch.Tensor):
-            arr = buffer.cpu().numpy()
+            planes = list(buffer.cpu().numpy())
+        elif isinstance(buffer, np.ndarray):
+            planes = list(buffer)
         else:
-            arr = buffer
+            planes = []
+            for p in buffer:
+                if isinstance(p, torch.Tensor):
+                    planes.append(p.cpu().numpy())
+                else:
+                    planes.append(p)
 
         digits = int(math.ceil(math.log10(self.signal_shape[0])))
-        for i, plane in enumerate(arr, start_index):
+        for i, plane in enumerate(planes, start_index):
             tifffile.imwrite(
                 root / f"{prefix}_{i:0{digits}}.tif",
                 plane,
                 compression="LZW",
-            )
-
-    def pad_3d_filtered_images(
-        self,
-        sample_plane: torch.Tensor | np.ndarray,
-        n_saved_planes: int,
-    ):
-        """
-        3d filters skip the first and last planes. This pads them by creating
-        those planes as blank planes so that all outputs have same number of
-        planes.
-        """
-        n = self.signal_shape[0]
-
-        if self.ball_filter.first_valid_plane:
-            # 3d filters skip first few planes
-            buff = np.zeros(
-                (self.ball_filter.first_valid_plane, *sample_plane.shape),
-                dtype=sample_plane.dtype,
-            )
-            self.save_tiffs("filtered_3d", 0, buff)
-            self.save_tiffs(
-                "struct_id",
-                0,
-                buff.astype(np.uint32),
-            )
-
-            n_saved_planes += self.ball_filter.first_valid_plane
-
-        if n_saved_planes < n:
-            buff = np.zeros(
-                (n - n_saved_planes, *sample_plane.shape),
-                dtype=sample_plane.dtype,
-            )
-            self.save_tiffs("filtered_3d", n_saved_planes, buff)
-            self.save_tiffs(
-                "struct_id", n_saved_planes, buff.astype(np.uint32)
             )
 
     def get_image(
@@ -337,30 +627,6 @@ class DetectionDebug:
             data = data.astype(dtype)
 
         return data
-
-    def _crop_image_if_needed(
-        self,
-        data: types.array,
-        start_plane: int = 0,
-        end_plane: int = 0,
-        bottom_corner: tuple[int, int] = (0, 0),
-        top_corner: tuple[int, int] = (0, 0),
-    ) -> types.array:
-        bot_y, bot_x = bottom_corner
-        top_y, top_x = top_corner
-
-        start_plane = max(start_plane, 0)
-        bot_y = max(bot_y, 0)
-        bot_x = max(bot_x, 0)
-
-        if end_plane <= 0:
-            end_plane = data.shape[0]
-        if top_y <= 0:
-            top_y = data.shape[1]
-        if top_x <= 0:
-            top_x = data.shape[2]
-
-        return data[start_plane:end_plane, bot_y:top_y, bot_x:top_x]
 
     def _load_detected_structs(
         self,
@@ -411,7 +677,7 @@ class DetectionDebug:
         signal: Path | str | np.ndarray | None = None,
         local_store_loader: "DetectionDebug" = None,
         start_gen_from: DetectionStage = DetectionStage.input,
-        end_gen_on: DetectionStage = DetectionStage.splitting,
+        end_gen_on: DetectionStage = DetectionStage.struct_splitting,
         start_plane: int = 0,
         end_plane: int = 0,
         bottom_corner: tuple[int, int] = (0, 0),
@@ -430,18 +696,14 @@ class DetectionDebug:
                 else str(signal)
             ),
         }
-
-        crop_f = partial(
-            self._crop_image_if_needed,
-            start_plane=start_plane,
-            end_plane=end_plane,
-            bottom_corner=bottom_corner,
-            top_corner=top_corner,
+        data_store = DataStore(
+            self, local_store_loader, start_gen_from, end_gen_on, start_plane,
+            end_plane, bottom_corner, top_corner,
         )
+        self.data_store = data_store
 
-        # we need the input signal data for all filtering stages except
-        # splitting. But we load from input only if we start at input
-        self.signal_array = None
+        # We load from original input only if we start at input because that's
+        # the first input to pipeline
         if start_gen_from == DetectionStage.input <= end_gen_on:
             if signal is not None:
                 data = self.get_image(arr_or_path=signal)
@@ -453,50 +715,11 @@ class DetectionDebug:
                 # can't get input data from our store, if we start with input
                 raise ValueError("Input data not provided")
 
-            self.signal_array = crop_f(data)
-        elif start_gen_from < DetectionStage.splitting:
-            if local_store_loader is None:
-                data = self.get_image(local_prefix="input")
-            else:
-                data = self.get_image(
-                    arr_or_path=local_store_loader.input_image_path
-                )
-
-            self.signal_array = crop_f(data)
-
-        # we only use clipped data when passing input to enhancement filter.
-        # If starting before enhancement we use the generated data
-        self.clipped_data = None
-        if start_gen_from == DetectionStage.enhanced <= end_gen_on:
-            if local_store_loader is None:
-                data = self.get_image(local_prefix="clipped")
-            else:
-                data = self.get_image(
-                    arr_or_path=local_store_loader.clipped_input_image_path
-                )
-            self.clipped_data = crop_f(data)
-
-        # we only use 2d filtered data when passing input to the 3d filter. If
-        # starting before 3d filtering we use the generated 2d data directly
-        self.inside_data = None
-        self.filtered_2d_data = None
-        if start_gen_from == DetectionStage.filtered_3d <= end_gen_on:
-            if local_store_loader is None:
-                inside_data = self.get_image(local_prefix="inside_brain")
-                filtered_data = self.get_image(local_prefix="filtered_2d")
-            else:
-                inside_data = self.get_image(
-                    arr_or_path=local_store_loader.inside_brain_image_path
-                )
-                filtered_data = self.get_image(
-                    arr_or_path=local_store_loader.filtered_2d_image_path
-                )
-            self.inside_data = crop_f(inside_data)
-            self.filtered_2d_data = crop_f(filtered_data)
+            data_store.input_data = data_store.crop_image_if_needed(data)
 
         # if starting from before splitting, we generate the cell data anew so
         # only load existing data if starting at splitting
-        if start_gen_from == DetectionStage.splitting <= end_gen_on:
+        if start_gen_from == DetectionStage.struct_splitting <= end_gen_on:
             self._load_detected_structs(
                 local_store_loader,
                 start_plane,
@@ -507,145 +730,184 @@ class DetectionDebug:
 
     def batch_input(
         self, i, start_gen_from: DetectionStage, end_gen_on: DetectionStage
-    ):
-        batch_size = self.batch_size
-
-        batch_np = np.asarray(self.signal_array[i : i + batch_size]).astype(
-            self.settings.plane_original_np_dtype
-        )
-        batch_np = self.settings.filter_data_converter_func(batch_np)
-        batch_torch = torch.from_numpy(batch_np).to(self.torch_device)
-
+    ) -> None:
         if start_gen_from <= DetectionStage.input <= end_gen_on:
-            self.save_tiffs("input", i, batch_np)
+            batch_torch, batch_np = self.data_store.input_batch
 
-        return batch_torch, batch_np
+            # we don't transform the input so just set it
+            self.data_store.input_batch = batch_torch, batch_np
+            self.save_tiffs("input", i, batch_np)
 
     def batch_clip(
         self,
         i,
-        batch_torch,
         start_gen_from: DetectionStage,
         end_gen_on: DetectionStage,
-    ):
+    ) -> None:
         if start_gen_from <= DetectionStage.clipped <= end_gen_on:
+            batch_torch, _ = self.data_store.input_batch
             batch_clipped = torch.clone(batch_torch)
             torch.clip_(batch_clipped, 0, self.tile_processor.clipping_value)
-            self.save_tiffs("clipped", i, batch_clipped)
-        elif start_gen_from == DetectionStage.enhanced <= end_gen_on:
-            batch_clipped = self.clipped_data[i : i + self.batch_size]
-            batch_clipped = np.asarray(
-                batch_clipped, dtype=self.settings.filtering_dtype
-            )
-            batch_clipped = torch.from_numpy(batch_clipped).to(
-                self.torch_device
-            )
-        else:
-            batch_clipped = None
 
-        return batch_clipped
+            self.data_store.clipped_input_batch = batch_clipped
+            self.save_tiffs("clipped_input", i, batch_clipped)
 
-    def batch_enhanced(
+    def batch_peak_enhanced(
         self,
         i,
-        batch_clipped,
         start_gen_from: DetectionStage,
         end_gen_on: DetectionStage,
-    ):
-        if start_gen_from <= DetectionStage.enhanced <= end_gen_on:
+    ) -> None:
+        if start_gen_from <= DetectionStage.peak_enhanced <= end_gen_on:
             enhanced_planes = self.tile_processor.peak_enhancer.enhance_peaks(
-                batch_clipped
+                self.data_store.clipped_input_batch
             )
-            self.save_tiffs("enhanced", i, enhanced_planes)
 
-    def batch_filter_2d(
+            self.data_store.peak_enhanced_batch = enhanced_planes
+            self.save_tiffs("peak_enhanced", i, enhanced_planes)
+
+    def batch_bin_2d_peaks(
         self,
         i,
-        batch_torch,
         start_gen_from: DetectionStage,
         end_gen_on: DetectionStage,
-    ):
-        if start_gen_from <= DetectionStage.filtered_2d <= end_gen_on:
-            filtered_2d, inside_brain_tiles = (
-                self.tile_processor.get_tile_mask(batch_torch)
-            )
+    ) -> None:
+        if start_gen_from <= DetectionStage.bin_2d_peaks <= end_gen_on:
+            batch_torch, _ = self.data_store.input_batch
+            batch_torch = torch.clone(batch_torch)
+            bin_2d_peaks, inside_brain_tiles, enhanced_planes = self.tile_processor.get_tile_mask(batch_torch)
+
+            self.data_store.peak_enhanced_batch = enhanced_planes
+            self.data_store.inside_batch = inside_brain_tiles
+            self.data_store.bin_2d_peaks_batch = bin_2d_peaks
             self.save_tiffs("inside_brain", i, inside_brain_tiles)
-            self.save_tiffs("filtered_2d", i, filtered_2d)
-        elif start_gen_from == DetectionStage.filtered_3d <= end_gen_on:
-            inside_brain_tiles = self.inside_data[i : i + self.batch_size]
-            inside_brain_tiles = np.asarray(inside_brain_tiles, dtype=bool)
-            inside_brain_tiles = torch.from_numpy(inside_brain_tiles).to(
-                self.torch_device
-            )
+            self.save_tiffs("bin_2d_peaks", i, bin_2d_peaks)
 
-            filtered_2d = self.filtered_2d_data[i : i + self.batch_size]
-            filtered_2d = np.asarray(
-                filtered_2d, dtype=self.settings.filtering_dtype
-            )
-            filtered_2d = torch.from_numpy(filtered_2d).to(self.torch_device)
-        else:
-            filtered_2d = None
-            inside_brain_tiles = None
-
-        return filtered_2d, inside_brain_tiles
-
-    def batch_filter_3d(
+    def batch_bin_3d_peaks(
         self,
         i,
-        filtered_2d,
-        inside_brain_tiles,
-        batch_np,
-        n_3d_planes: int,
-        previous_plane: np.ndarray,
         start_gen_from: DetectionStage,
         end_gen_on: DetectionStage,
-    ):
-        middle_planes = None
-        if not (start_gen_from <= DetectionStage.filtered_3d <= end_gen_on):
-            return n_3d_planes, previous_plane, middle_planes
+        do_flush: bool = False,
+    ) -> int | None:
+        tf = self.threshold_filter
+        if tf is None:
+            return None
 
-        ball_filter = self.ball_filter
+        if not (start_gen_from <= DetectionStage.bin_3d_peaks <= end_gen_on):
+            return None
+
+        if do_flush:
+            if not tf.flush():
+                return i
+        else:
+            _, batch_np = self.data_store.input_batch
+            tf.append(
+                self.data_store.peak_enhanced_batch,
+                self.data_store.bin_2d_peaks_batch.clone(),
+                batch_np,
+                self.data_store.inside_batch,
+            )
+
+        if not tf.ready:
+            return i
+
+        tf.walk()
+        planes = tf.get_processed_planes()
+        raw_data, masks = tf.get_processed_side_data_planes()
+
+        self.data_store.bin_3d_peaks_batch = planes, raw_data, masks
+        self.save_tiffs(
+            "bin_3d_peaks",
+            i,
+            planes,
+        )
+
+        return i + len(planes)
+
+    def batch_filter_3d_ball(
+        self,
+        i,
+        start_gen_from: DetectionStage,
+        end_gen_on: DetectionStage,
+        do_flush: bool = False,
+    ) -> int | None:
+        if not (start_gen_from <= DetectionStage.filtered_3d_ball <= end_gen_on):
+            return None
+
+        bf = self.ball_filter
+        tf = self.threshold_filter
+
+        if do_flush:
+            if not bf.flush():
+                return i
+        else:
+            if tf is None:
+                bin_peaks = self.data_store.bin_2d_peaks_batch
+                np_input = self.data_store.input_batch[1]
+                inside = self.data_store.inside_batch
+            else:
+                assert tf.ready
+                bin_peaks, np_input, inside = self.data_store.bin_3d_peaks_batch
+
+            # bf.append(bin_peaks, inside, np_input)
+            bf.inside_brain_tiles = None
+            bf.append(bin_peaks.clone(), None, np_input)
+
+        if not bf.ready:
+            return i
+
+        bf.walk()
+        data_planes = bf.get_processed_planes()
+        raw_planes = bf.get_raw_planes()
+        self.data_store.filtered_3d_ball_batch = data_planes, raw_planes
+
+        buff = data_planes.copy()
+        buff[buff != self.settings.soma_centre_value] = 0
+        self.save_tiffs(
+            "filtered_3d_ball",
+            i,
+            buff,
+        )
+
+        return i + len(raw_planes)
+
+    def batch_structs_detection(
+        self,
+        i,
+        previous_plane: np.ndarray | None,
+        start_gen_from: DetectionStage,
+        end_gen_on: DetectionStage,
+    ) -> tuple[np.ndarray | None, int]:
+        if not (start_gen_from <= DetectionStage.structs_detection <= end_gen_on):
+            return previous_plane, i
+
         detection_converter = self.settings.detection_data_converter_func
 
-        # ball_filter.append(filtered_2d, inside_brain_tiles, batch_np)
-        ball_filter.inside_brain_tiles = None
-        ball_filter.append(filtered_2d, None, batch_np)
-        if ball_filter.ready:
-            ball_filter.walk()
-            middle_planes = ball_filter.get_processed_planes()
-            raw_planes = ball_filter.get_raw_planes()
-            buff = middle_planes.copy()
-            buff[buff != self.settings.soma_centre_value] = 0
+        assert self.ball_filter.ready
+        data_planes, raw_planes = self.data_store.filtered_3d_ball_batch
+        detection_data_planes = detection_converter(data_planes)
+
+        for k, (plane, raw_plane, detection_plane) in enumerate(
+            zip(data_planes, raw_planes, detection_data_planes)
+        ):
+            previous_plane = self.cell_detector.process(
+                detection_plane, previous_plane, raw_plane
+            )
             self.save_tiffs(
-                "filtered_3d",
-                n_3d_planes + ball_filter.first_valid_plane,
-                buff,
+                "struct_id",
+                i + k,
+                previous_plane[None, :, :].astype(np.uint32),
             )
 
-            detection_middle_planes = detection_converter(middle_planes)
+        return previous_plane, i + data_planes.shape[0]
 
-            for k, (plane, raw_plane, detection_plane) in enumerate(
-                zip(middle_planes, raw_planes, detection_middle_planes)
-            ):
-                previous_plane = self.cell_detector.process(
-                    detection_plane, previous_plane, raw_plane
-                )
-                self.save_tiffs(
-                    "struct_id",
-                    i + k + ball_filter.first_valid_plane,
-                    previous_plane[None, :, :].astype(np.uint32),
-                )
-
-            n_3d_planes += len(middle_planes)
-
-        return n_3d_planes, previous_plane, middle_planes
-
-    def process_structures(
+    def process_structures_type(
         self,
         start_gen_from: DetectionStage,
         end_gen_on: DetectionStage,
     ):
-        if not (start_gen_from <= DetectionStage.filtered_3d <= end_gen_on):
+        if not (start_gen_from <= DetectionStage.struct_typed <= end_gen_on):
             return
 
         min_split_size = self.settings.max_cell_volume
@@ -769,7 +1031,7 @@ class DetectionDebug:
         end_gen_on: DetectionStage,
         progress_callback: Callable[[int, int, str], None] = None,
     ):
-        if not (start_gen_from <= DetectionStage.splitting <= end_gen_on):
+        if not (start_gen_from <= DetectionStage.struct_splitting <= end_gen_on):
             return
 
         min_split_size = self.settings.max_cell_volume
@@ -820,16 +1082,15 @@ class DetectionDebug:
             str(self.local_store / "struct_split_into_cell_candidate.yml"),
         )
 
-    def run_filter(
+    def _run_filter(
         self,
         start_gen_from: DetectionStage = DetectionStage.input,
-        end_gen_on: DetectionStage = DetectionStage.splitting,
+        end_gen_on: DetectionStage = DetectionStage.struct_splitting,
         progress_callback: Callable[[int, int, str], None] = None,
-    ):
-        previous_plane = None
-        n_3d_planes = 0
-        middle_planes = None
+    ) -> None:
         n_planes = self.signal_shape[0]
+        tf = self.threshold_filter
+        bf = self.ball_filter
 
         self.local_store.mkdir(parents=True, exist_ok=True)
         save_yaml(
@@ -841,41 +1102,117 @@ class DetectionDebug:
             self.config_yaml_path,
         )
 
+        n_3d_bin = 0
+        n_ball = 0
+        n_detected = 0
+        previous_plane = None
         for i in tqdm.tqdm(range(0, n_planes, self.batch_size), unit="planes"):
-            batch_torch, batch_np = self.batch_input(
-                i, start_gen_from, end_gen_on
+            self.data_store.set_current_batch(i)
+            if progress_callback is not None:
+                progress_callback(n_planes, i, "Detecting cells")
+
+            self.batch_input(i, start_gen_from, end_gen_on)
+            self.batch_clip(i, start_gen_from, end_gen_on)
+            self.batch_peak_enhanced(i, start_gen_from, end_gen_on)
+            self.batch_bin_2d_peaks(i, start_gen_from, end_gen_on)
+
+            processed = self.batch_bin_3d_peaks(n_3d_bin, start_gen_from, end_gen_on)
+            if processed is not None:
+                assert tf is not None
+                if processed == n_3d_bin:
+                    assert not tf.ready
+                    continue
+
+                assert tf.ready
+                n_3d_bin = processed
+
+            processed = self.batch_filter_3d_ball(
+                n_ball,
+                start_gen_from,
+                end_gen_on,
             )
-            batch_clipped = self.batch_clip(
-                i, batch_torch, start_gen_from, end_gen_on
-            )
-            self.batch_enhanced(i, batch_clipped, start_gen_from, end_gen_on)
-            filtered_2d, inside_brain_tiles = self.batch_filter_2d(
-                i, batch_torch, start_gen_from, end_gen_on
-            )
-            n_3d_planes, previous_plane, middle_planes = self.batch_filter_3d(
-                i,
-                filtered_2d,
-                inside_brain_tiles,
-                batch_np,
-                n_3d_planes,
+            if processed is not None:
+                if processed == n_ball:
+                    assert not bf.ready
+                    continue
+
+                assert bf.ready
+                n_ball = processed
+
+            previous_plane, n_detected = self.batch_structs_detection(
+                n_detected,
                 previous_plane,
                 start_gen_from,
                 end_gen_on,
             )
 
-            if progress_callback is not None:
-                progress_callback(n_planes, i, "Detecting cells")
+            try:
+                # try to get any errors from the thread, if present
+                msg = self.thread_runner.get_msg_from_thread(timeout=0)
+                if msg == EOFSignal:
+                    raise TypeError("Tiff saving thread exited early")
+            except Empty:
+                pass
 
-        if start_gen_from <= DetectionStage.filtered_3d <= end_gen_on:
-            self.pad_3d_filtered_images(
-                middle_planes[0, :, :],
-                n_3d_planes,
+        processed = self.batch_bin_3d_peaks(n_3d_bin, start_gen_from, end_gen_on, do_flush=True)
+        if processed is not None and n_3d_bin != processed:
+            # there was new data in the tf flush, add it to ball
+            processed = self.batch_filter_3d_ball(
+                n_ball,
+                start_gen_from,
+                end_gen_on,
+            )
+            if processed is not None and n_ball != processed:
+                # there was new data in ball, process it
+                n_ball = processed
+                previous_plane, n_detected = self.batch_structs_detection(
+                    n_detected,
+                    previous_plane,
+                    start_gen_from,
+                    end_gen_on,
+                )
+
+        processed = self.batch_filter_3d_ball(
+            n_ball,
+            start_gen_from,
+            end_gen_on,
+            do_flush=True,
+        )
+        if processed is not None and n_ball != processed:
+            # there was new data in ball flush, process it
+            self.batch_structs_detection(
+                n_detected,
+                previous_plane,
+                start_gen_from,
+                end_gen_on,
             )
 
-        self.process_structures(start_gen_from, end_gen_on)
+        self.process_structures_type(start_gen_from, end_gen_on)
         self.process_structure_splitting(
             start_gen_from, end_gen_on, progress_callback
         )
+
+        # reset caches
+        self.data_store.reset()
+
+    def run_filter(
+            self,
+            start_gen_from: DetectionStage = DetectionStage.input,
+            end_gen_on: DetectionStage = DetectionStage.struct_splitting,
+            progress_callback: Callable[[int, int, str], None] = None,
+    ) -> None:
+        self.thread_runner = ThreadWithException(target=thread_run, pass_self=True)
+        thread_runner = self.thread_runner
+        thread_runner.start()
+
+        try:
+            self._run_filter(start_gen_from, end_gen_on, progress_callback)
+        finally:
+            thread_runner.notify_to_end_thread()
+            self.thread_runner = None
+
+            thread_runner.join()
+            thread_runner.clear_remaining()
 
 
 @inference_wrapper
@@ -946,9 +1283,9 @@ if __name__ == "__main__":
         detection_debug.load_data(
             signal=r"D:\code_data\lightsheet\cellfinder\MF1_378M_W_BS_561_cropped.tif",
             start_gen_from=DetectionStage.input,
-            end_gen_on=DetectionStage.splitting,
+            end_gen_on=DetectionStage.struct_splitting,
         )
         detection_debug.run_filter(
             start_gen_from=DetectionStage.input,
-            end_gen_on=DetectionStage.splitting,
+            end_gen_on=DetectionStage.struct_splitting,
         )
