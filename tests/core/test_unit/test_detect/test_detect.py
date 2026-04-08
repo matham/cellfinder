@@ -69,7 +69,7 @@ def test_main_bad_or_default_args(mocked_main):
     process.assert_called()
     get_results.assert_called()
 
-    vol_filter, mp_tile_processor, signal_array = process.call_args.args
+    vol_filter, mp_plane_filter, signal_array = process.call_args.args
     (
         _,
         splitting_settings,
@@ -93,7 +93,7 @@ def test_main_planes_size(mocked_main):
     main(signal_array=np.empty((5, 8, 19)), end_plane=4, start_plane=1)
 
     process.assert_called()
-    vol_filter, mp_tile_processor, signal_array = process.call_args.args
+    vol_filter, mp_plane_filter, signal_array = process.call_args.args
     settings = vol_filter.settings
 
     assert settings.plane_shape == (8, 19)
@@ -108,7 +108,7 @@ def test_main_splitting_cpu_cuda(mocker: MockerFixture):
     vol: MagicMock = mocker.patch(
         "cellfinder.core.detect.detect.VolumeFilter", autospec=True
     )
-    mocker.patch("cellfinder.core.detect.detect.TileProcessor", autospec=True)
+    mocker.patch("cellfinder.core.detect.detect.PlaneFilter", autospec=True)
 
     main(
         signal_array=np.empty((5, 8, 19)), batch_size=None, torch_device="cuda"

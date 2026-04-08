@@ -6,7 +6,7 @@ from cellfinder.core.detect.filters.plane.classical_filter import PeakEnhancer
 from cellfinder.core.detect.filters.plane.tile_walker import TileWalker
 
 
-class TileProcessor:
+class PlaneFilter:
     """
     Processor that filters each plane to highlight the peaks and also
     tiles and thresholds each plane returning a mask indicating which
@@ -25,8 +25,6 @@ class TileProcessor:
 
     Parameters
     ----------
-    plane_shape : tuple(int, int)
-        Height/width of the planes.
     clipping_value : int
         Upper value that the input planes are clipped to. Result is scaled so
         max is this value.
@@ -52,23 +50,16 @@ class TileProcessor:
         pytorch filters used on CUDA. Scipy filters can be faster.
     """
 
-    # Upper value that the input plane is clipped to. Result is scaled so
-    # max is this value
+    # Upper value that the input plane is clipped to
     clipping_value: int
-    # Value used to mark bright features in the input planes after they have
-    # been run through the 2D filter
-    threshold_value: int
-    # voxels who are this many std above mean or more are set to
-    # threshold_value
-    n_sds_above_mean_thresh: float
-    # the torch device name
-    torch_device: str = ""
 
     # filter that finds the peaks in the planes
     peak_enhancer: PeakEnhancer = None
     # generates tiles of the planes, with each tile marked as being inside
     # or outside the brain based on brightness
     tile_walker: TileWalker = None
+
+    threshold_filter: "ThresholdFilter" = None
 
     def __init__(
         self,
@@ -83,9 +74,10 @@ class TileProcessor:
         use_scipy: bool,
     ):
         self.clipping_value = clipping_value
-        self.threshold_value = threshold_value
-        self.n_sds_above_mean_thresh = n_sds_above_mean_thresh
-        self.torch_device = torch_device
+
+        self.threshold_filter = ThresholdFilter(
+            threshold_value, n_sds_above_mean_thresh
+        )
 
         laplace_gaussian_sigma = log_sigma_size * soma_diameter
         self.peak_enhancer = PeakEnhancer(
@@ -101,44 +93,129 @@ class TileProcessor:
             soma_diameter=soma_diameter,
         )
 
-    def get_tile_mask(
-        self, planes: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def clip_input(self, planes: torch.Tensor) -> torch.Tensor:
         """
-        Applies the filtering listed in the class description.
+        Clips the input planes, in-place, to specified `clipping_value`.
 
         Parameters
         ----------
         planes : torch.Tensor
-            Input planes (z-stack). Note, the input data is modified.
+            Input planes (z-stack).
 
         Returns
         -------
-        filtered_planes : torch.Tensor
-            Filtered and thresholded planes (z-stack).
-        inside_brain_tiles : torch.Tensor
-            Boolean mask indicating which tiles are inside (1) or
-            outside (0) the brain.
-            It's a z-stack whose planes are the shape of the number of tiles
-            in each planar axis.
+        clipped planes : torch.Tensor
+            Same tensor as the input `planes`.
         """
         torch.clip_(planes, 0, self.clipping_value)
-        # Get tiles that are within the brain
-        inside_brain_tiles = self.tile_walker.get_bright_tiles(planes)
-        # Threshold the image
-        enhanced_planes = self.peak_enhancer.enhance_peaks(planes)
+        return planes
 
+    def smooth_planes(self, planes: torch.Tensor) -> torch.Tensor:
+        """
+        Takes previously clipped planes and smooths them using median ang
+        Gaussian filtering.
+
+        Parameters
+        ----------
+        planes : torch.Tensor
+            Input planes (z-stack). It is not modified.
+
+        Returns
+        -------
+        smoothed_planes : torch.Tensor
+            Smoothed planes (z-stack).
+        """
+        return self.peak_enhancer.smooth_planes(planes)
+
+    def peak_enhance_planes(self, planes: torch.Tensor) -> torch.Tensor:
+        """
+        Takes previously clipped planes and enhances the peaks.
+
+        Parameters
+        ----------
+        planes : torch.Tensor
+            Input planes (z-stack). It is not modified.
+
+        Returns
+        -------
+        peak_enhanced_planes : torch.Tensor
+            Peak enhanced planes (z-stack).
+        """
+        return self.peak_enhancer.enhance_peaks(planes)
+
+    def threshold_peak_enhanced_planes(
+        self, planes: torch.Tensor, peak_enhanced_planes: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Takes previously clipped and peak enhanced planes and thresholds them
+        and saves the result into the clipped planes tensor.
+
+        Parameters
+        ----------
+        planes : torch.Tensor
+            Clipped input planes (z-stack). It is modified in-place.
+        peak_enhanced_planes : torch.Tensor
+            Peak enhanced planes (z-stack). It is not modified.
+
+        Returns
+        -------
+        thresholded planes : torch.Tensor
+            Same tensor as the input `planes`.
+        """
+        self.threshold_filter.threshold_planes(
+            planes,
+            peak_enhanced_planes,
+        )
+        return planes
+
+    def get_inside_mask(self, planes: torch.Tensor) -> torch.Tensor:
+        """
+        Takes previously clipped planes and estimates the tiles that are
+        inside/outside the brain.
+
+        Parameters
+        ----------
+        planes : torch.Tensor
+            Input planes (z-stack). It is not modified.
+
+        Returns
+        -------
+        peak_enhanced_planes : torch.Tensor
+            Peak enhanced planes (z-stack).
+        """
+        return self.tile_walker.get_bright_tiles(planes)
+
+    def get_tiled_buffer(self, depth: int, device: str):
+        return self.tile_walker.get_tiled_buffer(depth, device)
+
+
+class ThresholdFilter:
+
+    # Value used to mark bright features in the input planes after they have
+    # been run through the 2D filter
+    threshold_value: int
+    # voxels who are this many std above mean or more are set to
+    # threshold_value
+    n_sds_above_mean_thresh: float
+
+    def __init__(
+        self,
+        threshold_value: int,
+        n_sds_above_mean_thresh: float,
+    ):
+        self.threshold_value = threshold_value
+        self.n_sds_above_mean_thresh = n_sds_above_mean_thresh
+
+    def threshold_planes(
+        self, planes: torch.Tensor, enhanced_planes: torch.Tensor
+    ) -> torch.Tensor:
         _threshold_planes(
             planes,
             enhanced_planes,
             self.n_sds_above_mean_thresh,
             self.threshold_value,
         )
-
-        return planes, inside_brain_tiles, enhanced_planes
-
-    def get_tiled_buffer(self, depth: int, device: str):
-        return self.tile_walker.get_tiled_buffer(depth, device)
+        return planes
 
 
 @torch.jit.script

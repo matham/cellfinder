@@ -196,7 +196,7 @@ def debug_results_callback(
     end_gen_on: DetectionStage,
     detect_debug: DetectionDebug,
 ):
-    tiler = detect_debug.tile_processor.tile_walker
+    tiler = detect_debug.plane_filter.tile_walker
     for tp, data_path, name, stage, dtype in [
         (
             "image",

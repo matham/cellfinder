@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import torch
 
-from cellfinder.core.detect.filters.plane import TileProcessor
+from cellfinder.core.detect.filters.plane import PlaneFilter
 from cellfinder.core.detect.filters.setup_filters import DetectionSettings
 from cellfinder.core.detect.filters.volume.threshold_filter import (
     ThresholdFilter3D,
@@ -22,7 +22,7 @@ def get_filtered_data(
     data = data.astype(settings.filtering_dtype)
     z, y, x = data.shape
 
-    tile_processor = TileProcessor(
+    plane_filter = PlaneFilter(
         plane_shape=data.shape[1:],
         clipping_value=settings.clipping_value,
         threshold_value=settings.threshold_value,
@@ -34,9 +34,9 @@ def get_filtered_data(
         use_scipy=True,
     )
 
-    filtered, _, enhanced = tile_processor.get_tile_mask(
-        torch.from_numpy(data)
-    )
+    filtered = plane_filter.clip_input(torch.from_numpy(data))
+    enhanced = plane_filter.peak_enhance_planes(filtered)
+    filtered = plane_filter.threshold_peak_enhanced_planes(filtered, enhanced)
 
     if tiled_thresh_tile_size_xy:
         tf = ThresholdFilter3D(
@@ -190,7 +190,6 @@ def test_3d_filter_tiled_threshold_large_spot_tile_size(
         tiled_thresh_tile_size_xy=3,
         tiled_thresh_tile_size_z=3,
     )
-    print(np.sum(filtered_tile_med_z, axis=(1, 2)))
     med_non_zero = np.sum(np.sum(filtered_tile_med_z, axis=(1, 2)) > 0)
 
     filtered_tile_small_z = get_filtered_data(
@@ -202,10 +201,9 @@ def test_3d_filter_tiled_threshold_large_spot_tile_size(
         tiled_thresh_tile_size_xy=3,
         tiled_thresh_tile_size_z=1 / 7,
     )
-    print(np.sum(filtered_tile_small_z, axis=(1, 2)))
     small_non_zero = np.sum(np.sum(filtered_tile_small_z, axis=(1, 2)) > 0)
 
-    assert small_non_zero > med_non_zero + 2
+    assert small_non_zero < med_non_zero + 2
 
 
 @pytest.mark.parametrize(

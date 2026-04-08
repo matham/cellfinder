@@ -3,7 +3,7 @@ import pytest
 import torch
 from brainglobe_utils.IO.image.load import read_with_dask
 
-from cellfinder.core.detect.filters.plane import TileProcessor
+from cellfinder.core.detect.filters.plane import PlaneFilter
 from cellfinder.core.detect.filters.plane.classical_filter import PeakEnhancer
 from cellfinder.core.detect.filters.plane.tile_walker import TileWalker
 from cellfinder.core.detect.filters.setup_filters import DetectionSettings
@@ -67,8 +67,18 @@ def test_2d_filtering_peak_enhance_parity(
         use_scipy=use_scipy,
     )
     enhanced_our = enhancer.enhance_peaks(data)
-    enhanced_our = enhanced_our.cpu().numpy().astype(np.uint32)
 
+    # originally acquired data had enhanced peaks normalized between 0-clip,
+    # so we do the same
+    planes_min = torch.amin(enhanced_our, dim=(1, 2), keepdim=True)
+    enhanced_our.sub_(planes_min)
+    planes_max = torch.amax(enhanced_our, dim=(1, 2), keepdim=True)
+    # if min = max = zero, divide by 1 - it'll stay zero
+    planes_max[planes_max == 0] = 1
+    enhanced_our.div_(planes_max)
+    enhanced_our.mul_(clip)
+
+    enhanced_our = enhanced_our.cpu().numpy().astype(np.uint32)
     assert enhanced_our.shape == enhanced.shape
     # the number of pixels per plane that are different
     different = np.sum(
@@ -133,7 +143,7 @@ def test_2d_filtering_parity(
     data = torch.from_numpy(settings.filter_data_converter_func(data))
     data = data.to(torch_device)
 
-    tile_processor = TileProcessor(
+    plane_filter = PlaneFilter(
         plane_shape=data[0, :, :].shape,
         clipping_value=settings.clipping_value,
         threshold_value=settings.threshold_value,
@@ -146,7 +156,12 @@ def test_2d_filtering_parity(
     )
 
     # apply filter and get data back
-    filtered_our, tiles_our, _ = tile_processor.get_tile_mask(data)
+    filtered_our = plane_filter.clip_input(data)
+    tiles_our = plane_filter.get_inside_mask(filtered_our)
+    enhanced = plane_filter.peak_enhance_planes(filtered_our)
+    filtered_our = plane_filter.threshold_peak_enhanced_planes(
+        filtered_our, enhanced
+    )
     filtered_our = filtered_our.cpu().numpy().astype(np.uint16)
     tiles_our = tiles_our.cpu().numpy()
 
@@ -180,7 +195,7 @@ def test_2d_filter_padding(plane_size):
     data = np.random.randint(0, 500, size=(1, *plane_size))
     data = data.astype(settings.filtering_dtype)
 
-    tile_processor = TileProcessor(
+    plane_filter = PlaneFilter(
         plane_shape=plane_size,
         clipping_value=settings.clipping_value,
         threshold_value=settings.threshold_value,
@@ -192,7 +207,9 @@ def test_2d_filter_padding(plane_size):
         use_scipy=False,
     )
 
-    filtered, _, _ = tile_processor.get_tile_mask(torch.from_numpy(data))
+    filtered = plane_filter.clip_input(torch.from_numpy(data))
+    enhanced = plane_filter.peak_enhance_planes(filtered)
+    filtered = plane_filter.threshold_peak_enhanced_planes(filtered, enhanced)
     filtered = filtered.numpy()
     assert filtered.shape == data.shape
 
@@ -254,7 +271,7 @@ def get_filtered_data(
     settings = DetectionSettings(plane_original_np_dtype=np.uint16)
     data = data.astype(settings.filtering_dtype)
 
-    tile_processor = TileProcessor(
+    plane_filter = PlaneFilter(
         plane_shape=data.shape[1:],
         clipping_value=settings.clipping_value,
         threshold_value=settings.threshold_value,
@@ -266,7 +283,9 @@ def get_filtered_data(
         use_scipy=True,
     )
 
-    filtered, _, _ = tile_processor.get_tile_mask(torch.from_numpy(data))
+    filtered = plane_filter.clip_input(torch.from_numpy(data))
+    enhanced = plane_filter.peak_enhance_planes(filtered)
+    filtered = plane_filter.threshold_peak_enhanced_planes(filtered, enhanced)
     return (filtered == settings.threshold_value).numpy()
 
 

@@ -22,7 +22,7 @@ import torch
 from brainglobe_utils.cells.cells import Cell
 
 from cellfinder.core import logger, types
-from cellfinder.core.detect.filters.plane import TileProcessor
+from cellfinder.core.detect.filters.plane import PlaneFilter
 from cellfinder.core.detect.filters.setup_filters import DetectionSettings
 from cellfinder.core.detect.filters.volume.volume_filter import VolumeFilter
 from cellfinder.core.tools.tools import inference_wrapper
@@ -250,7 +250,7 @@ def main(
     mp_3d_filter = VolumeFilter(settings=settings)
 
     # Create 2D analysis filter
-    mp_tile_processor = TileProcessor(
+    mp_plane_filter = PlaneFilter(
         plane_shape=settings.plane_shape,
         clipping_value=settings.clipping_value,
         threshold_value=settings.threshold_value,
@@ -266,7 +266,7 @@ def main(
     torch.set_num_threads(settings.n_torch_comp_threads)
 
     # process the data
-    mp_3d_filter.process(mp_tile_processor, signal_array, callback=callback)
+    mp_3d_filter.process(mp_plane_filter, signal_array, callback=callback)
     cells = mp_3d_filter.get_results(splitting_settings)
 
     torch.set_num_threads(orig_n_threads)

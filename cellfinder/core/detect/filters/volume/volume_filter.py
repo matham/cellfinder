@@ -10,7 +10,7 @@ from tifffile import tifffile
 from tqdm import tqdm
 
 from cellfinder.core import logger, types
-from cellfinder.core.detect.filters.plane import TileProcessor
+from cellfinder.core.detect.filters.plane import PlaneFilter
 from cellfinder.core.detect.filters.setup_filters import DetectionSettings
 from cellfinder.core.detect.filters.volume.ball_filter import BallFilter
 from cellfinder.core.detect.filters.volume.structure_detection import (
@@ -37,7 +37,7 @@ _done_signal = "is_done"
 @inference_wrapper
 def _plane_filter(
     process: ProcessWithException,
-    tile_processor: TileProcessor,
+    plane_filter: PlaneFilter,
     n_threads: int,
     buffers: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]],
 ):
@@ -61,13 +61,16 @@ def _plane_filter(
         token, i = msg
         tensor, masks, enhanced_buffer = buffers[token]
 
-        plane, mask, enhanced_planes = tile_processor.get_tile_mask(
-            tensor[i : i + 1, :, :]
-        )
-        tensor[i : i + 1, :, :] = plane
+        # plane gets edited in place
+        plane = tensor[i : i + 1, :, :]
+        plane_filter.clip_input(plane)
+        mask = plane_filter.get_inside_mask(plane)
+        enhanced_plane = plane_filter.peak_enhance_planes(plane)
+        plane_filter.threshold_peak_enhanced_planes(plane, enhanced_plane)
+
         masks[i : i + 1, :, :] = mask
         if enhanced_buffer is not None:
-            enhanced_buffer[i : i + 1, :, :] = enhanced_planes
+            enhanced_buffer[i : i + 1, :, :] = enhanced_plane
 
         # tell the main thread we processed all the planes for this tensor
         process.send_msg_to_mainthread(None)
@@ -150,7 +153,7 @@ class VolumeFilter:
             )
 
     def _get_filter_buffers(
-        self, cpu: bool, tile_processor: TileProcessor
+        self, cpu: bool, plane_filter: PlaneFilter
     ) -> List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]]:
         """
         Generates buffers to use for data loading and filtering.
@@ -186,7 +189,7 @@ class VolumeFilter:
             # additionally, enhanced is only sent if using threshold filter
             enhanced_planes = None
             if cpu:
-                masks = tile_processor.get_tiled_buffer(
+                masks = plane_filter.get_tiled_buffer(
                     batch_size, self.settings.torch_device
                 )
                 if self.threshold_filter is not None:
@@ -277,7 +280,7 @@ class VolumeFilter:
 
     def process(
         self,
-        tile_processor: TileProcessor,
+        plane_filter: PlaneFilter,
         signal_array,
         *,
         callback: Optional[Callable[[int], None]],
@@ -301,7 +304,7 @@ class VolumeFilter:
         # until a tensor is free to be reused.
         # We have to keep the tensors in memory in main process while it's
         # in used elsewhere
-        buffers = self._get_filter_buffers(cpu, tile_processor)
+        buffers = self._get_filter_buffers(cpu, plane_filter)
 
         # on cpu these processes will 2d filter each plane in the batch
         plane_processes = []
@@ -309,7 +312,7 @@ class VolumeFilter:
             for _ in range(self.settings.batch_size):
                 process = ProcessWithException(
                     target=_plane_filter,
-                    args=(tile_processor, n_threads, buffers),
+                    args=(plane_filter, n_threads, buffers),
                     pass_self=True,
                 )
                 process.start()
@@ -332,7 +335,7 @@ class VolumeFilter:
         cells_thread.start()
 
         try:
-            self._process(feed_thread, cells_thread, tile_processor, cpu)
+            self._process(feed_thread, cells_thread, plane_filter, cpu)
         finally:
             # if we end, make sure to tell the threads to stop
             feed_thread.notify_to_end_thread()
@@ -360,7 +363,7 @@ class VolumeFilter:
         self,
         feed_thread: ThreadWithException,
         cells_thread: ThreadWithException,
-        tile_processor: TileProcessor,
+        plane_filter: PlaneFilter,
         cpu: bool,
     ) -> None:
         """
@@ -372,7 +375,6 @@ class VolumeFilter:
         processing_tokens = []
         bf = self.ball_filter
         tf = self.threshold_filter
-
 
         while True:
             # thread/underlying queues get first crack at msg. Unless we get
@@ -419,7 +421,7 @@ class VolumeFilter:
 
             # normal operation, msg is new 2d filtered data
             raw_data, planes, masks, enhanced = self._unpack_feeder_thread_msg(
-                msg, processing_tokens, cpu, tile_processor
+                msg, processing_tokens, cpu, plane_filter
             )
             if tf is not None:
                 # pass through tf if using
@@ -453,7 +455,7 @@ class VolumeFilter:
         ],
         processing_tokens: list[int],
         cpu: bool,
-        tile_processor: TileProcessor,
+        plane_filter: PlaneFilter,
     ) -> tuple[np.ndarray, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         token, np_data, tensor, masks, enhanced, used_processors, n = msg
         # this token is in use until we return it
@@ -467,15 +469,19 @@ class VolumeFilter:
             for process in used_processors:
                 process.get_msg_from_thread()
             # batch size can change at the end so resize buffer
-            planes = tensor[:n, :, :]
+            tensor = tensor[:n, :, :]
             masks = masks[:n, :, :]
             if enhanced is not None:
                 enhanced = enhanced[:n, :, :]
         else:
             # we're not doing 2d filtering in different process
-            planes, masks, enhanced = tile_processor.get_tile_mask(tensor)
+            # tensor is edited in-place
+            plane_filter.clip_input(tensor)
+            masks = plane_filter.get_inside_mask(tensor)
+            enhanced = plane_filter.peak_enhance_planes(tensor)
+            plane_filter.threshold_peak_enhanced_planes(tensor, enhanced)
 
-        return np_data, planes, masks, enhanced
+        return np_data, tensor, masks, enhanced
 
     def _send_ball_filter_result_to_cell_detector(
         self,

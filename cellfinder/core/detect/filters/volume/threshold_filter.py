@@ -1,5 +1,6 @@
 import math
 from typing import Sequence
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -270,16 +271,16 @@ def _threshold_volume(
     if tile_xy_size < 2 or (not do_tile_y) and (not do_tile_x):
         return
 
-    # in 2d filters each plane is independently normalized so absolute values
-    # mean nothing between planes. By normalizing to mean/std, assuming
-    # neighboring planes have somewhat similar stats, we can now tile across
-    # planes and use the same threshold across neighboring planes
-    std, mean = torch.std_mean(data_planes, dim=(1, 2), keepdim=True)
-    # don't edit in place since same plane may be "walked" in multiple calls
-    data_planes = data_planes - mean
-    # if min = max = zero, divide by 1 - it'll stay zero
-    std[std == 0] = 1
-    data_planes.div_(std)
+    # # in 2d filters each plane is independently normalized so absolute values
+    # # mean nothing between planes. By normalizing to mean/std, assuming
+    # # neighboring planes have somewhat similar stats, we can now tile across
+    # # planes and use the same threshold across neighboring planes
+    # std, mean = torch.std_mean(data_planes, dim=(1, 2), keepdim=True)
+    # # don't edit in place since same plane may be "walked" in multiple calls
+    # data_planes = data_planes - mean
+    # # if min = max = zero, divide by 1 - it'll stay zero
+    # std[std == 0] = 1
+    # data_planes.div_(std)
 
     # num edge pixels dropped b/c moving by stride would move tile off edge
     y_rem = y % stride_xy

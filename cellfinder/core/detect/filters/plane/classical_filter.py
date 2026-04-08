@@ -6,38 +6,6 @@ from scipy.signal import medfilt2d
 
 
 @torch.jit.script
-def normalize(
-    filtered_planes: torch.Tensor,
-    flip: bool,
-    max_value: float = 1.0,
-) -> None:
-    """
-    Normalizes the 3d tensor so each z-plane is independently scaled to be
-    in the [0, max_value] range. If `flip` is `True`, the sign of the tensor
-    values are flipped before any processing.
-
-    It is done to filtered_planes inplace.
-    """
-    num_z = filtered_planes.shape[0]
-    filtered_planes_1d = filtered_planes.view(num_z, -1)
-
-    if flip:
-        filtered_planes_1d.mul_(-1)
-
-    planes_min = torch.min(filtered_planes_1d, dim=1, keepdim=True)[0]
-    filtered_planes_1d.sub_(planes_min)
-    # take max after subtraction
-    planes_max = torch.max(filtered_planes_1d, dim=1, keepdim=True)[0]
-    # if min = max = zero, divide by 1 - it'll stay zero
-    planes_max[planes_max == 0] = 1
-    filtered_planes_1d.div_(planes_max)
-
-    if max_value != 1.0:
-        # To leave room to label in the 3d detection.
-        filtered_planes_1d.mul_(max_value)
-
-
-@torch.jit.script
 def filter_for_peaks(
     planes: torch.Tensor,
     med_kernel: torch.Tensor,
@@ -45,7 +13,7 @@ def filter_for_peaks(
     gauss_kernel_size: int,
     lap_kernel: torch.Tensor,
     device: str,
-    clipping_value: float,
+    apply_laplacian: bool,
 ) -> torch.Tensor:
     """
     Takes the 3d z-stack and returns a new z-stack where the peaks are
@@ -65,10 +33,6 @@ def filter_for_peaks(
     filtered_planes = filtered_planes.median(dim=1, keepdim=True)[0]
 
     # ------------------ gaussian filter ------------------
-    # normalize the input data to 0-1 range. Otherwise, if the values are
-    # large, we'd need a float64 so conv result is accurate
-    normalize(filtered_planes, flip=False)
-
     # we need to do reflection padding around the tensor for parity with scipy
     # gaussian filtering. Scipy does reflection in a manner typically called
     # symmetric: (dcba|abcd|dcba). Torch does it like this: (dcb|abcd|cba). So
@@ -121,6 +85,9 @@ def filter_for_peaks(
             filtered_planes, gauss_kernel, padding="valid"
         )
 
+    if not apply_laplacian:
+        return filtered_planes[:, 0, :, :]
+
     # ------------------ laplacian filter ------------------
     # it's a 2d filter. Need to pad using symmetric for scipy parity. But,
     # torch doesn't have it, and we used a kernel of size 3, so for padding of
@@ -134,7 +101,7 @@ def filter_for_peaks(
     filtered_planes = filtered_planes[:, 0, :, :]
 
     # scale back to full scale, filtered values are negative so flip
-    normalize(filtered_planes, flip=True, max_value=clipping_value)
+    filtered_planes.mul_(-1)
     return filtered_planes
 
 
@@ -313,10 +280,36 @@ class PeakEnhancer:
             device=torch_device,
         ).view(1, 1, 3, 3)
 
+    def smooth_planes(self, planes: torch.Tensor) -> torch.Tensor:
+        """
+        Applies the smoothing to the 3d z-stack (not inplace)
+        and returns the smoothed z-stack.
+        """
+        if self.torch_device == "cpu" and self.use_scipy:
+            filtered_planes = planes.clone()
+            for i in range(planes.shape[0]):
+                img = planes[i, :, :].numpy()
+                img = medfilt2d(img)
+                img = gaussian_filter(img, self.laplace_gaussian_sigma)
+                filtered_planes[i, :, :] = torch.from_numpy(img)
+
+            return filtered_planes
+
+        filtered_planes = filter_for_peaks(
+            planes,
+            self.med_kernel,
+            self.gauss_kernel,
+            self.gaussian_filter_size,
+            self.lap_kernel,
+            self.torch_device,
+            False,
+        )
+        return filtered_planes
+
     def enhance_peaks(self, planes: torch.Tensor) -> torch.Tensor:
         """
-        Applies the filtering and normalization to the 3d z-stack (not inplace)
-        and returns the filtered z-stack.
+        Applies the smoothing and peak enhancement the 3d z-stack (not inplace)
+        and returns the peak-enhanced z-stack.
         """
         if self.torch_device == "cpu" and self.use_scipy:
             filtered_planes = planes.clone()
@@ -328,11 +321,7 @@ class PeakEnhancer:
                 filtered_planes[i, :, :] = torch.from_numpy(img)
 
             # laplace makes values negative so flip
-            normalize(
-                filtered_planes,
-                flip=True,
-                max_value=self.clipping_value,
-            )
+            filtered_planes.mul_(-1)
             return filtered_planes
 
         filtered_planes = filter_for_peaks(
@@ -342,6 +331,6 @@ class PeakEnhancer:
             self.gaussian_filter_size,
             self.lap_kernel,
             self.torch_device,
-            self.clipping_value,
+            True,
         )
         return filtered_planes

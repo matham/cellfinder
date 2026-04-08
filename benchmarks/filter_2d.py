@@ -14,7 +14,7 @@ from benchmark_tools import (
 )
 from brainglobe_utils.IO.image.load import read_with_dask
 
-from cellfinder.core.detect.filters.plane import TileProcessor
+from cellfinder.core.detect.filters.plane import PlaneFilter
 from cellfinder.core.detect.filters.setup_filters import DetectionSettings
 
 
@@ -43,7 +43,7 @@ def setup_filter(
     signal_array = settings.filter_data_converter_func(signal_array)
     signal_array = torch.from_numpy(signal_array).to(torch_device)
 
-    tile_processor = TileProcessor(
+    plane_filter = PlaneFilter(
         plane_shape=shape[1:],
         clipping_value=settings.clipping_value,
         threshold_value=settings.threshold_value,
@@ -55,12 +55,12 @@ def setup_filter(
         use_scipy=use_scipy,
     )
 
-    return tile_processor, signal_array, batch_size
+    return plane_filter, signal_array, batch_size
 
 
-def run_filter(tile_processor, signal_array, batch_size):
+def run_filter(plane_filter, signal_array, batch_size):
     for i in range(0, len(signal_array), batch_size):
-        tile_processor.get_tile_mask(signal_array[i : i + batch_size])
+        plane_filter.get_tile_mask(signal_array[i : i + batch_size])
 
 
 if __name__ == "__main__":

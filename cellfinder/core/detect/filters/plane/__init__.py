@@ -1,1 +1,1 @@
-from .plane_filter import TileProcessor
+from .plane_filter import PlaneFilter
