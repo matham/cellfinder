@@ -213,17 +213,17 @@ def debug_results_callback(
             None,
         ),
         (
+            "labels",
+            detect_debug.inside_brain_image_path,
+            "Inside brain mask",
+            DetectionStage.clipped,
+            None,
+        ),
+        (
             "image",
             detect_debug.peak_enhanced_image_path,
             "Peak enhanced",
             DetectionStage.peak_enhanced,
-            None,
-        ),
-        (
-            "labels",
-            detect_debug.inside_brain_image_path,
-            "Inside brain mask",
-            DetectionStage.bin_2d_peaks,
             None,
         ),
         (
