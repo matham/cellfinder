@@ -281,7 +281,7 @@ def test_detection_cluster_splitting(
         pytest.xfail("Cuda is not available")
 
     signal_array, background_array, centers_xyz = synthetic_spot_clusters
-    signal_array = signal_array.astype(np.float32)
+    signal_array = signal_array.astype(np.uint16)
 
     detected = detect_main(
         signal_array,

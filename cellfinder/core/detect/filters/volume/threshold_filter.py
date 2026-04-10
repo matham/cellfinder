@@ -205,7 +205,7 @@ class ThresholdFilter3D:
 
     def get_processed_side_data_planes(
         self,
-    ) -> tuple[list[torch.Tensor | np.ndarray], ...]:
+    ) -> list[list[torch.Tensor | np.ndarray]]:
         if not self.ready:
             raise TypeError("Not enough planes were appended")
 

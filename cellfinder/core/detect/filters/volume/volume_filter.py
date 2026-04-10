@@ -13,6 +13,9 @@ from cellfinder.core import logger, types
 from cellfinder.core.detect.filters.plane import PlaneFilter
 from cellfinder.core.detect.filters.setup_filters import DetectionSettings
 from cellfinder.core.detect.filters.volume.ball_filter import BallFilter
+from cellfinder.core.detect.filters.volume.laplacian_filter import (
+    LaplacianFilter3D,
+)
 from cellfinder.core.detect.filters.volume.structure_detection import (
     CellDetector,
     get_structure_centre,
@@ -39,7 +42,7 @@ def _plane_filter(
     process: ProcessWithException,
     plane_filter: PlaneFilter,
     n_threads: int,
-    buffers: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]],
+    buffers: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
 ):
     """
     When running on cpu, we spin up a process for each plane in the batch.
@@ -64,13 +67,8 @@ def _plane_filter(
         # plane gets edited in place
         plane = tensor[i : i + 1, :, :]
         plane_filter.clip_input(plane)
-        mask = plane_filter.get_inside_mask(plane)
-        enhanced_plane = plane_filter.peak_enhance_planes(plane)
-        plane_filter.threshold_peak_enhanced_planes(plane, enhanced_plane)
-
-        masks[i : i + 1, :, :] = mask
-        if enhanced_buffer is not None:
-            enhanced_buffer[i : i + 1, :, :] = enhanced_plane
+        masks[i : i + 1, :, :] = plane_filter.get_inside_mask(plane)
+        enhanced_buffer[i : i + 1, :, :] = plane_filter.smooth_planes(plane)
 
         # tell the main thread we processed all the planes for this tensor
         process.send_msg_to_mainthread(None)
@@ -95,6 +93,13 @@ class VolumeFilter:
 
     def __init__(self, settings: DetectionSettings):
         self.settings = settings
+
+        self.lap_filter = LaplacianFilter3D(
+            voxel_sizes=settings.voxel_sizes,
+            dtype=settings.filtering_dtype.__name__,
+            batch_size=settings.batch_size,
+            torch_device=settings.torch_device,
+        )
 
         tile_size = settings.tiled_thresh_tile_size
         if tile_size:
@@ -145,6 +150,9 @@ class VolumeFilter:
             self.settings.num_prefetch_batches,
             self.ball_filter.num_batches_before_ready,
         )
+        self.n_queue_buffer = max(
+            self.n_queue_buffer, self.lap_filter.num_batches_before_ready
+        )
 
         if self.threshold_filter is not None:
             self.n_queue_buffer = max(
@@ -154,7 +162,7 @@ class VolumeFilter:
 
     def _get_filter_buffers(
         self, cpu: bool, plane_filter: PlaneFilter
-    ) -> List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]]:
+    ) -> List[Tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]]:
         """
         Generates buffers to use for data loading and filtering.
 
@@ -186,14 +194,12 @@ class VolumeFilter:
             # second process to copy data into them. For gpu we get the buffers
             # directly from the functions that create then
             masks = None
-            # additionally, enhanced is only sent if using threshold filter
             enhanced_planes = None
             if cpu:
                 masks = plane_filter.get_tiled_buffer(
                     batch_size, self.settings.torch_device
                 )
-                if self.threshold_filter is not None:
-                    enhanced_planes = torch.empty_like(tensor)
+                enhanced_planes = torch.empty_like(tensor)
 
             buffers.append((tensor, masks, enhanced_planes))
 
@@ -205,7 +211,7 @@ class VolumeFilter:
         thread: ThreadWithException,
         data: types.array,
         processors: List[ProcessWithException],
-        buffers: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]],
+        buffers: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
     ) -> None:
         """
         Runs in its own thread. It loads the input data planes, converts them
@@ -245,8 +251,11 @@ class VolumeFilter:
             # for last batch, it can be smaller than normal so only set up to n
             tensor[:n, :, :] = torch.from_numpy(np_data)
             tensor = tensor[:n, :, :]
+            # on cuda, they are both None
             if masks is not None:
                 masks = masks[:n]
+            if enhanced is not None:
+                enhanced = enhanced[:n]
             # For CPU, we send the tensor token to the 2d filtering processes
             # who have access to the tensors already. They overwrite the data
             # in the tensor with the filtered data and let the main thread
@@ -373,8 +382,9 @@ class VolumeFilter:
         for cell detection.
         """
         processing_tokens = []
-        bf = self.ball_filter
+        lf = self.lap_filter
         tf = self.threshold_filter
+        bf = self.ball_filter
 
         while True:
             # thread/underlying queues get first crack at msg. Unless we get
@@ -388,59 +398,141 @@ class VolumeFilter:
             # if feeder thread has no more data, process remaining data already
             # waiting in tf/bf
             if msg == _done_signal:
-                # check tf has no waiting data by flushing it, if there weren't
-                # any new tf data, process remaining bf data and exit
-                if tf is None or not tf.flush():
-                    if bf.flush():
-                        assert bf.ready
-                        self._send_ball_filter_result_to_cell_detector(
-                            feed_thread, cells_thread, processing_tokens
-                        )
-                    return
-
-                # else, need to finish processing flushed tf data first. If
-                # flush returned true, no need to check if ready
-                assert tf.ready
-                tf.walk()
-                planes = tf.get_processed_planes()
-                raw_data, masks = tf.get_processed_side_data_planes()
-                bf.append(planes, masks, raw_data)
-                # first finish (newly) ready bf data, return if detector asks
-                if not self._send_ball_filter_result_to_cell_detector(
-                    feed_thread, cells_thread, processing_tokens
-                ):
-                    return
-
-                # flush bf and process flushed data and exit
-                if bf.flush():
-                    assert bf.ready
-                    self._send_ball_filter_result_to_cell_detector(
-                        feed_thread, cells_thread, processing_tokens
-                    )
+                self._flush_filters(
+                    feed_thread, cells_thread, processing_tokens, plane_filter
+                )
                 return
 
-            # normal operation, msg is new 2d filtered data
-            raw_data, planes, masks, enhanced = self._unpack_feeder_thread_msg(
+            # normal operation, msg is new 2d gaussian filtered data
+            raw_data, masks, enhanced = self._unpack_feeder_thread_msg(
                 msg, processing_tokens, cpu, plane_filter
             )
+
+            # apply laplacian to enhance peaks
+            lf.append(enhanced, raw_data, masks)
+            if not lf.ready:
+                continue
+            lf.walk()
+            enhanced = lf.get_processed_planes()
+            raw_data, masks = lf.get_processed_side_data_planes()
+
+            # threshold enhanced peaks using 2d per plane threshold
+            binarized = [
+                plane_filter.threshold_peak_enhanced_planes(p[None, ...])[
+                    0, ...
+                ]
+                for p in enhanced
+            ]
+
+            # further threshold using tiles if using
             if tf is not None:
                 # pass through tf if using
-                tf.append(enhanced, planes, raw_data, masks)
+                tf.append(
+                    torch.stack(enhanced),
+                    torch.stack(binarized),
+                    np.stack(raw_data),
+                    torch.stack(masks),
+                )
                 if not tf.ready:
                     # wait for more data before we can use any tf results
                     continue
 
                 # it's ready to pass on to bf
                 tf.walk()
-                planes = tf.get_processed_planes()
+                binarized = tf.get_processed_planes()
                 raw_data, masks = tf.get_processed_side_data_planes()
 
-            bf.append(planes, masks, raw_data)
+            # apply ball filtering
+            bf.append(binarized, masks, raw_data)
             # process bf data if ready and exit if detector asked
             if not self._send_ball_filter_result_to_cell_detector(
                 feed_thread, cells_thread, processing_tokens
             ):
                 return
+
+    def _flush_filters(
+        self,
+        feed_thread: ThreadWithException,
+        cells_thread: ThreadWithException,
+        processing_tokens: list,
+        plane_filter: PlaneFilter,
+    ):
+        lf = self.lap_filter
+        bf = self.ball_filter
+        tf = self.threshold_filter
+
+        if lf.flush():
+            assert lf.ready
+            lf.walk()
+            enhanced = lf.get_processed_planes()
+            raw_data, masks = lf.get_processed_side_data_planes()
+
+            binarized = [
+                plane_filter.threshold_peak_enhanced_planes(p[None, ...])[
+                    0, ...
+                ]
+                for p in enhanced
+            ]
+
+            # further threshold using tiles if using
+            if tf is not None:
+                # pass through tf if using
+                tf.append(
+                    torch.stack(enhanced),
+                    torch.stack(binarized),
+                    np.stack(raw_data),
+                    torch.stack(masks),
+                )
+                if tf.ready:
+                    # it's ready to pass on to bf
+                    tf.walk()
+                    binarized = tf.get_processed_planes()
+                    raw_data, masks = tf.get_processed_side_data_planes()
+
+                    # apply ball filtering
+                    bf.append(binarized, masks, raw_data)
+                    # process bf data if ready and exit if detector asked
+                    if not self._send_ball_filter_result_to_cell_detector(
+                        feed_thread, cells_thread, processing_tokens
+                    ):
+                        return
+            else:
+                bf.append(binarized, masks, raw_data)
+                # process bf data if ready and exit if detector asked
+                if not self._send_ball_filter_result_to_cell_detector(
+                    feed_thread, cells_thread, processing_tokens
+                ):
+                    return
+
+        # check tf has no waiting data by flushing it, if there weren't
+        # any new tf data, process remaining bf data and exit
+        if tf is None or not tf.flush():
+            if bf.flush():
+                assert bf.ready
+                self._send_ball_filter_result_to_cell_detector(
+                    feed_thread, cells_thread, processing_tokens
+                )
+            return
+
+        # else, need to finish processing flushed tf data first. If
+        # flush returned true, no need to check if ready
+        assert tf.ready
+        tf.walk()
+        planes = tf.get_processed_planes()
+        raw_data, masks = tf.get_processed_side_data_planes()
+        bf.append(planes, masks, raw_data)
+        # first finish (newly) ready bf data, return if detector asks
+        if not self._send_ball_filter_result_to_cell_detector(
+            feed_thread, cells_thread, processing_tokens
+        ):
+            return
+
+        # flush bf and process flushed data and exit
+        if bf.flush():
+            assert bf.ready
+            self._send_ball_filter_result_to_cell_detector(
+                feed_thread, cells_thread, processing_tokens
+            )
 
     def _unpack_feeder_thread_msg(
         self,
@@ -456,7 +548,7 @@ class VolumeFilter:
         processing_tokens: list[int],
         cpu: bool,
         plane_filter: PlaneFilter,
-    ) -> tuple[np.ndarray, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[np.ndarray, torch.Tensor, torch.Tensor]:
         token, np_data, tensor, masks, enhanced, used_processors, n = msg
         # this token is in use until we return it
         processing_tokens.append(token)
@@ -469,19 +561,16 @@ class VolumeFilter:
             for process in used_processors:
                 process.get_msg_from_thread()
             # batch size can change at the end so resize buffer
-            tensor = tensor[:n, :, :]
             masks = masks[:n, :, :]
-            if enhanced is not None:
-                enhanced = enhanced[:n, :, :]
+            enhanced = enhanced[:n, :, :]
         else:
             # we're not doing 2d filtering in different process
             # tensor is edited in-place
             plane_filter.clip_input(tensor)
             masks = plane_filter.get_inside_mask(tensor)
-            enhanced = plane_filter.peak_enhance_planes(tensor)
-            plane_filter.threshold_peak_enhanced_planes(tensor, enhanced)
+            enhanced = plane_filter.smooth_planes(tensor)
 
-        return np_data, tensor, masks, enhanced
+        return np_data, masks, enhanced
 
     def _send_ball_filter_result_to_cell_detector(
         self,

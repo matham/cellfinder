@@ -144,26 +144,23 @@ class PlaneFilter:
         return self.peak_enhancer.enhance_peaks(planes)
 
     def threshold_peak_enhanced_planes(
-        self, planes: torch.Tensor, peak_enhanced_planes: torch.Tensor
+        self, peak_enhanced_planes: torch.Tensor
     ) -> torch.Tensor:
         """
         Takes previously clipped and peak enhanced planes and thresholds them
-        and saves the result into the clipped planes tensor.
+        a plane at a time.
 
         Parameters
         ----------
-        planes : torch.Tensor
-            Clipped input planes (z-stack). It is modified in-place.
         peak_enhanced_planes : torch.Tensor
             Peak enhanced planes (z-stack). It is not modified.
 
         Returns
         -------
         thresholded planes : torch.Tensor
-            Same tensor as the input `planes`.
+            New tensor.
         """
-        self.threshold_filter.threshold_planes(
-            planes,
+        planes = self.threshold_filter.threshold_planes(
             peak_enhanced_planes,
         )
         return planes
@@ -206,11 +203,8 @@ class ThresholdFilter:
         self.threshold_value = threshold_value
         self.n_sds_above_mean_thresh = n_sds_above_mean_thresh
 
-    def threshold_planes(
-        self, planes: torch.Tensor, enhanced_planes: torch.Tensor
-    ) -> torch.Tensor:
-        _threshold_planes(
-            planes,
+    def threshold_planes(self, enhanced_planes: torch.Tensor) -> torch.Tensor:
+        planes = _threshold_planes(
             enhanced_planes,
             self.n_sds_above_mean_thresh,
             self.threshold_value,
@@ -220,11 +214,10 @@ class ThresholdFilter:
 
 @torch.jit.script
 def _threshold_planes(
-    planes: torch.Tensor,
     enhanced_planes: torch.Tensor,
     n_sds_above_mean_thresh: float,
     threshold_value: int,
-) -> None:
+) -> torch.Tensor:
     """
     Sets each pixel in the returned planes to threshold_value, where the
     corresponding enhanced_plane > mean + n_sds_above_mean_thresh*std.
@@ -243,6 +236,6 @@ def _threshold_planes(
     # value in *enhanced_planes*. So, there could be values in planes that are
     # at threshold already, but in enhanced_planes they are not. So it's best
     # to zero all other values, so voxels previously at threshold don't count
-    t = torch.tensor(threshold_value, dtype=planes.dtype, device=planes.device)
-    zero = torch.tensor(0, dtype=planes.dtype, device=planes.device)
-    torch.where(enhanced_planes > threshold, t, zero, out=planes)
+    planes = torch.zeros_like(enhanced_planes)
+    planes[enhanced_planes > threshold] = threshold_value
+    return planes

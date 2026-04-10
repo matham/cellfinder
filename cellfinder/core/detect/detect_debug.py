@@ -21,6 +21,9 @@ from cellfinder.core import types
 from cellfinder.core.detect.filters.plane import PlaneFilter
 from cellfinder.core.detect.filters.setup_filters import DetectionSettings
 from cellfinder.core.detect.filters.volume.ball_filter import BallFilter
+from cellfinder.core.detect.filters.volume.laplacian_filter import (
+    LaplacianFilter3D,
+)
 from cellfinder.core.detect.filters.volume.structure_detection import (
     CellDetector,
     get_structure_centre,
@@ -83,9 +86,9 @@ class DataStore:
 
     clipped_data: types.array | None = None
 
-    peak_enhanced_data: types.array | None = None
-
     inside_data: types.array | None = None
+
+    peak_enhanced_data: types.array | None = None
 
     bin_2d_peaks_data: types.array | None = None
 
@@ -99,11 +102,21 @@ class DataStore:
 
     _clipped_batch: torch.Tensor | None = None
 
-    _peak_enhanced_batch: torch.Tensor | None = None
-
     _inside_batch: torch.Tensor | None = None
 
-    _bin_2d_peaks_batch: torch.Tensor | None = None
+    _peak_enhanced_batch: (
+        tuple[list[torch.Tensor], list[np.ndarray], list[torch.Tensor]] | None
+    ) = None
+
+    _bin_2d_peaks_batch: (
+        tuple[
+            list[torch.Tensor],
+            list[torch.Tensor],
+            list[np.ndarray],
+            list[torch.Tensor],
+        ]
+        | None
+    ) = None
 
     _bin_3d_peaks_batch: (
         tuple[list[torch.Tensor], list[np.ndarray], list[torch.Tensor]] | None
@@ -159,23 +172,6 @@ class DataStore:
                 arr_or_path=getattr(lsl, f"{prefix}_image_path")
             )
         return self.crop_image_if_needed(data)
-
-    def reset(self) -> None:
-        self.input_data = None
-        self.clipped_data = None
-        self.peak_enhanced_data = None
-        self.inside_data = None
-        self.bin_2d_peaks_data = None
-        self.bin_3d_peaks_data = None
-        self.filtered_3d_ball_data = None
-
-        self._input_batch = None
-        self._clipped_batch = None
-        self._peak_enhanced_batch = None
-        self._inside_batch = None
-        self._bin_2d_peaks_batch = None
-        self._bin_3d_peaks_batch = None
-        self._filtered_3d_ball_batch = None
 
     def set_current_batch(self, batch: int) -> None:
         self.current_batch = batch
@@ -237,30 +233,6 @@ class DataStore:
         self._clipped_batch = value
 
     @property
-    def peak_enhanced_batch(self) -> torch.Tensor:
-        if self._peak_enhanced_batch is not None:
-            return self._peak_enhanced_batch
-
-        if self.peak_enhanced_data is None:
-            self.peak_enhanced_data = self._load_stack("peak_enhanced")
-
-        batch_size = self.detection.batch_size
-        i = self.current_batch
-
-        enhanced_planes = self.peak_enhanced_data[i : i + batch_size]
-        enhanced_planes = np.asarray(
-            enhanced_planes, dtype=self.settings.filtering_dtype
-        )
-        enhanced_planes = torch.from_numpy(enhanced_planes).to(
-            self.detection.torch_device
-        )
-        return enhanced_planes
-
-    @peak_enhanced_batch.setter
-    def peak_enhanced_batch(self, value: torch.Tensor) -> None:
-        self._peak_enhanced_batch = value
-
-    @property
     def inside_batch(self) -> torch.Tensor:
         if self._inside_batch is not None:
             return self._inside_batch
@@ -283,7 +255,47 @@ class DataStore:
         self._inside_batch = value
 
     @property
-    def bin_2d_peaks_batch(self) -> torch.Tensor:
+    def peak_enhanced_batch(
+        self,
+    ) -> tuple[list[torch.Tensor], list[np.ndarray], list[torch.Tensor]]:
+        if self._peak_enhanced_batch is not None:
+            return self._peak_enhanced_batch
+
+        if self.peak_enhanced_data is None:
+            self.peak_enhanced_data = self._load_stack("peak_enhanced")
+
+        batch_size = self.detection.batch_size
+        i = self.current_batch
+
+        enhanced_planes = self.peak_enhanced_data[i : i + batch_size]
+        enhanced_planes = np.asarray(
+            enhanced_planes, dtype=self.settings.filtering_dtype
+        )
+        enhanced_planes = torch.from_numpy(enhanced_planes).to(
+            self.detection.torch_device
+        )
+        return (
+            list(enhanced_planes),
+            list(self.input_batch[1]),
+            list(self.inside_batch),
+        )
+
+    @peak_enhanced_batch.setter
+    def peak_enhanced_batch(
+        self,
+        value: tuple[list[torch.Tensor], list[np.ndarray], list[torch.Tensor]],
+    ) -> None:
+        self._peak_enhanced_batch = value
+
+    @property
+    def bin_2d_peaks_batch(
+        self,
+    ) -> tuple[
+        list[torch.Tensor],
+        list[torch.Tensor],
+        list[np.ndarray],
+        list[torch.Tensor],
+    ]:
         if self._bin_2d_peaks_batch is not None:
             return self._bin_2d_peaks_batch
 
@@ -298,10 +310,25 @@ class DataStore:
         bin_2d_peaks = torch.from_numpy(bin_2d_peaks).to(
             self.detection.torch_device
         )
-        return bin_2d_peaks
+        enhanced, np_data, inside = self.peak_enhanced_batch
+
+        return (
+            enhanced,
+            list(bin_2d_peaks),
+            np_data,
+            inside,
+        )
 
     @bin_2d_peaks_batch.setter
-    def bin_2d_peaks_batch(self, value: torch.Tensor) -> None:
+    def bin_2d_peaks_batch(
+        self,
+        value: tuple[
+            list[torch.Tensor],
+            list[torch.Tensor],
+            list[np.ndarray],
+            list[torch.Tensor],
+        ],
+    ) -> None:
         self._bin_2d_peaks_batch = value
 
     @property
@@ -519,22 +546,13 @@ class DetectionDebug:
         )
 
     @cached_property
-    def ball_filter(self) -> BallFilter:
+    def lap_filter(self) -> LaplacianFilter3D | None:
         settings = self.settings
-        return BallFilter(
-            plane_height=settings.plane_height,
-            plane_width=settings.plane_width,
-            ball_xy_size=settings.ball_xy_size,
-            ball_z_size=settings.ball_z_size,
-            overlap_fraction=settings.ball_overlap_fraction,
-            threshold_value=settings.threshold_value,
-            soma_centre_value=settings.soma_centre_value,
-            tile_height=settings.tile_height,
-            tile_width=settings.tile_width,
+        return LaplacianFilter3D(
+            voxel_sizes=settings.voxel_sizes,
             dtype=settings.filtering_dtype.__name__,
-            batch_size=self.batch_size,
-            torch_device=self.torch_device,
-            use_mask=True,
+            batch_size=settings.batch_size,
+            torch_device=settings.torch_device,
         )
 
     @cached_property
@@ -554,6 +572,25 @@ class DetectionDebug:
             dtype=settings.filtering_dtype.__name__,
             batch_size=settings.batch_size,
             torch_device=settings.torch_device,
+        )
+
+    @cached_property
+    def ball_filter(self) -> BallFilter:
+        settings = self.settings
+        return BallFilter(
+            plane_height=settings.plane_height,
+            plane_width=settings.plane_width,
+            ball_xy_size=settings.ball_xy_size,
+            ball_z_size=settings.ball_z_size,
+            overlap_fraction=settings.ball_overlap_fraction,
+            threshold_value=settings.threshold_value,
+            soma_centre_value=settings.soma_centre_value,
+            tile_height=settings.tile_height,
+            tile_width=settings.tile_width,
+            dtype=settings.filtering_dtype.__name__,
+            batch_size=self.batch_size,
+            torch_device=self.torch_device,
+            use_mask=True,
         )
 
     @cached_property
@@ -769,24 +806,61 @@ class DetectionDebug:
         if start_gen_from <= DetectionStage.clipped <= end_gen_on:
             batch_torch, _ = self.data_store.input_batch
             batch_clipped = torch.clone(batch_torch)
-            torch.clip_(batch_clipped, 0, self.plane_filter.clipping_value)
+
+            self.plane_filter.clip_input(batch_clipped)
+            inside_brain_tiles = self.plane_filter.get_inside_mask(
+                batch_clipped
+            )
 
             self.data_store.clipped_input_batch = batch_clipped
-            self.save_tiffs("clipped_input", i, batch_clipped)
+            self.data_store.inside_batch = inside_brain_tiles
+
+            self.save_tiffs("clipped_input", i, batch_clipped.cpu().numpy())
+            self.save_tiffs(
+                "inside_brain", i, inside_brain_tiles.cpu().numpy()
+            )
 
     def batch_peak_enhanced(
         self,
         i,
         start_gen_from: DetectionStage,
         end_gen_on: DetectionStage,
-    ) -> None:
-        if start_gen_from <= DetectionStage.peak_enhanced <= end_gen_on:
-            enhanced_planes = self.plane_filter.peak_enhancer.enhance_peaks(
+        do_flush: bool = False,
+    ) -> int | None:
+        lf = self.lap_filter
+
+        if not (start_gen_from <= DetectionStage.peak_enhanced <= end_gen_on):
+            return None
+
+        if do_flush:
+            if not lf.flush():
+                return i
+        else:
+            _, batch_np = self.data_store.input_batch
+            smoothed = self.plane_filter.smooth_planes(
                 self.data_store.clipped_input_batch
             )
+            lf.append(
+                smoothed,
+                batch_np,
+                self.data_store.inside_batch,
+            )
 
-            self.data_store.peak_enhanced_batch = enhanced_planes
-            self.save_tiffs("peak_enhanced", i, enhanced_planes)
+        if not lf.ready:
+            return i
+
+        lf.walk()
+        enhanced = lf.get_processed_planes()
+        raw_data, masks = lf.get_processed_side_data_planes()
+
+        self.data_store.peak_enhanced_batch = enhanced, raw_data, masks
+        self.save_tiffs(
+            "peak_enhanced",
+            i,
+            [p.cpu().numpy() for p in enhanced],
+        )
+
+        return i + len(enhanced)
 
     def batch_bin_2d_peaks(
         self,
@@ -795,21 +869,18 @@ class DetectionDebug:
         end_gen_on: DetectionStage,
     ) -> None:
         if start_gen_from <= DetectionStage.bin_2d_peaks <= end_gen_on:
-            batch_torch, _ = self.data_store.input_batch
-            batch_torch = torch.clone(batch_torch)
-
-            clipped = self.plane_filter.clip_input(batch_torch)
-            inside_brain_tiles = self.plane_filter.get_inside_mask(clipped)
-            enhanced_planes = self.plane_filter.peak_enhance_planes(clipped)
+            enhanced, np_data, masks = self.data_store.peak_enhanced_batch
             bin_2d_peaks = self.plane_filter.threshold_peak_enhanced_planes(
-                clipped, enhanced_planes
+                torch.stack(enhanced)
             )
 
-            self.data_store.peak_enhanced_batch = enhanced_planes
-            self.data_store.inside_batch = inside_brain_tiles
-            self.data_store.bin_2d_peaks_batch = bin_2d_peaks
-            self.save_tiffs("inside_brain", i, inside_brain_tiles)
-            self.save_tiffs("bin_2d_peaks", i, bin_2d_peaks)
+            self.data_store.bin_2d_peaks_batch = (
+                enhanced,
+                list(bin_2d_peaks),
+                np_data,
+                masks,
+            )
+            self.save_tiffs("bin_2d_peaks", i, bin_2d_peaks.cpu().numpy())
 
     def batch_bin_3d_peaks(
         self,
@@ -829,29 +900,31 @@ class DetectionDebug:
             if not tf.flush():
                 return i
         else:
-            _, batch_np = self.data_store.input_batch
+            enhanced, bin_2d_peaks, np_data, masks = (
+                self.data_store.bin_2d_peaks_batch
+            )
             tf.append(
-                self.data_store.peak_enhanced_batch,
-                self.data_store.bin_2d_peaks_batch.clone(),
-                batch_np,
-                self.data_store.inside_batch,
+                torch.stack(enhanced),
+                torch.stack(bin_2d_peaks),  # clone
+                np.stack(np_data),
+                torch.stack(masks),
             )
 
         if not tf.ready:
             return i
 
         tf.walk()
-        planes = tf.get_processed_planes()
+        binarized = tf.get_processed_planes()
         raw_data, masks = tf.get_processed_side_data_planes()
 
-        self.data_store.bin_3d_peaks_batch = planes, raw_data, masks
+        self.data_store.bin_3d_peaks_batch = binarized, raw_data, masks
         self.save_tiffs(
             "bin_3d_peaks",
             i,
-            planes,
+            [p.cpu().numpy() for p in binarized],
         )
 
-        return i + len(planes)
+        return i + len(binarized)
 
     def batch_filter_3d_ball(
         self,
@@ -873,9 +946,9 @@ class DetectionDebug:
                 return i
         else:
             if tf is None:
-                bin_peaks = self.data_store.bin_2d_peaks_batch
-                np_input = self.data_store.input_batch[1]
-                inside = self.data_store.inside_batch
+                _, bin_peaks, np_input, inside = (
+                    self.data_store.bin_2d_peaks_batch
+                )
             else:
                 assert tf.ready
                 bin_peaks, np_input, inside = (
@@ -884,7 +957,7 @@ class DetectionDebug:
 
             # bf.append(bin_peaks, inside, np_input)
             bf.inside_brain_tiles = None
-            bf.append(bin_peaks.clone(), None, np_input)
+            bf.append(bin_peaks, None, np_input)
 
         if not bf.ready:
             return i
@@ -1125,6 +1198,7 @@ class DetectionDebug:
         progress_callback: Callable[[int, int, str], None] = None,
     ) -> None:
         n_planes = self.signal_shape[0]
+        lf = self.lap_filter
         tf = self.threshold_filter
         bf = self.ball_filter
 
@@ -1138,6 +1212,7 @@ class DetectionDebug:
             self.config_yaml_path,
         )
 
+        n_enhanced = 0
         n_3d_bin = 0
         n_ball = 0
         n_detected = 0
@@ -1149,8 +1224,19 @@ class DetectionDebug:
 
             self.batch_input(i, start_gen_from, end_gen_on)
             self.batch_clip(i, start_gen_from, end_gen_on)
-            self.batch_peak_enhanced(i, start_gen_from, end_gen_on)
-            self.batch_bin_2d_peaks(i, start_gen_from, end_gen_on)
+            processed = self.batch_peak_enhanced(
+                n_enhanced, start_gen_from, end_gen_on
+            )
+            if processed is None:
+                self.batch_bin_2d_peaks(i, start_gen_from, end_gen_on)
+            else:
+                if processed == n_enhanced:
+                    assert not lf.ready
+                    continue
+
+                assert lf.ready
+                self.batch_bin_2d_peaks(n_enhanced, start_gen_from, end_gen_on)
+                n_enhanced = processed
 
             processed = self.batch_bin_3d_peaks(
                 n_3d_bin, start_gen_from, end_gen_on
@@ -1191,6 +1277,33 @@ class DetectionDebug:
                     raise TypeError("Tiff saving thread exited early")
             except Empty:
                 pass
+
+        processed = self.batch_peak_enhanced(
+            n_enhanced, start_gen_from, end_gen_on, do_flush=True
+        )
+        if processed is not None and processed != n_enhanced:
+            self.batch_bin_2d_peaks(n_enhanced, start_gen_from, end_gen_on)
+
+            processed = self.batch_bin_3d_peaks(
+                n_3d_bin, start_gen_from, end_gen_on
+            )
+            if processed is not None and n_3d_bin != processed:
+                n_3d_bin = processed
+                # there was new data in the tf flush, add it to ball
+                processed = self.batch_filter_3d_ball(
+                    n_ball,
+                    start_gen_from,
+                    end_gen_on,
+                )
+                if processed is not None and n_ball != processed:
+                    # there was new data in ball, process it
+                    n_ball = processed
+                    previous_plane, n_detected = self.batch_structs_detection(
+                        n_detected,
+                        previous_plane,
+                        start_gen_from,
+                        end_gen_on,
+                    )
 
         processed = self.batch_bin_3d_peaks(
             n_3d_bin, start_gen_from, end_gen_on, do_flush=True
@@ -1233,8 +1346,11 @@ class DetectionDebug:
         )
 
         # reset caches
-        self.data_store.reset()
+        self.data_store = None
+        if self.torch_device != "cpu":
+            torch.cuda.empty_cache()
 
+    @inference_wrapper
     def run_filter(
         self,
         start_gen_from: DetectionStage = DetectionStage.input,

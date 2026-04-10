@@ -36,7 +36,7 @@ def get_filtered_data(
 
     filtered = plane_filter.clip_input(torch.from_numpy(data))
     enhanced = plane_filter.peak_enhance_planes(filtered)
-    filtered = plane_filter.threshold_peak_enhanced_planes(filtered, enhanced)
+    filtered = plane_filter.threshold_peak_enhanced_planes(enhanced)
 
     if tiled_thresh_tile_size_xy:
         tf = ThresholdFilter3D(

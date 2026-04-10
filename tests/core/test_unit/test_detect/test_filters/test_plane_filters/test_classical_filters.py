@@ -159,9 +159,7 @@ def test_2d_filtering_parity(
     filtered_our = plane_filter.clip_input(data)
     tiles_our = plane_filter.get_inside_mask(filtered_our)
     enhanced = plane_filter.peak_enhance_planes(filtered_our)
-    filtered_our = plane_filter.threshold_peak_enhanced_planes(
-        filtered_our, enhanced
-    )
+    filtered_our = plane_filter.threshold_peak_enhanced_planes(enhanced)
     filtered_our = filtered_our.cpu().numpy().astype(np.uint16)
     tiles_our = tiles_our.cpu().numpy()
 
@@ -209,7 +207,7 @@ def test_2d_filter_padding(plane_size):
 
     filtered = plane_filter.clip_input(torch.from_numpy(data))
     enhanced = plane_filter.peak_enhance_planes(filtered)
-    filtered = plane_filter.threshold_peak_enhanced_planes(filtered, enhanced)
+    filtered = plane_filter.threshold_peak_enhanced_planes(enhanced)
     filtered = filtered.numpy()
     assert filtered.shape == data.shape
 
@@ -285,7 +283,7 @@ def get_filtered_data(
 
     filtered = plane_filter.clip_input(torch.from_numpy(data))
     enhanced = plane_filter.peak_enhance_planes(filtered)
-    filtered = plane_filter.threshold_peak_enhanced_planes(filtered, enhanced)
+    filtered = plane_filter.threshold_peak_enhanced_planes(enhanced)
     return (filtered == settings.threshold_value).numpy()
 
 
