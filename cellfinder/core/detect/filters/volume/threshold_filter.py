@@ -6,6 +6,24 @@ import torch
 import torch.nn.functional as F
 
 
+def cat_z_tensors(
+    volume: torch.Tensor | None,
+    planes: torch.Tensor | Sequence[torch.Tensor],
+) -> torch.Tensor:
+    volumes = [] if volume is None else [volume]
+
+    if isinstance(planes, torch.Tensor):
+        # it's already a single 3d tensor
+        volumes.append(planes)
+    else:
+        # it's a list of 2d tensors - make it 3d
+        volumes.extend([p[None, ...] for p in planes])
+
+    if len(volumes) == 1:
+        return volumes[0]
+    return torch.cat(volumes, dim=0)
+
+
 class ThresholdFilter3D:
     """
     A 3D ball filter.
@@ -81,7 +99,9 @@ class ThresholdFilter3D:
         """
         return self.volume.shape[0] >= self.tile_z_size
 
-    def _append_to_volume(self, data_planes: torch.Tensor) -> int:
+    def _append_to_volume(
+        self, data_planes: torch.Tensor | Sequence[torch.Tensor]
+    ) -> int:
         """
         Append new data to volume and remove previously processed volume data.
         """
@@ -94,21 +114,19 @@ class ThresholdFilter3D:
                 num_remaining_with_padding = num_remaining + self.middle_z_idx
             remaining_start = self.volume.shape[0] - num_remaining_with_padding
 
-            self.volume = torch.cat(
-                [self.volume[remaining_start:, :, :], data_planes],
-                dim=0,
+            self.volume = cat_z_tensors(
+                self.volume[remaining_start:, :, :], data_planes
             )
         elif self.middle_z_idx > 0:
             # need to pad the start before middle plane
-            self.volume = torch.cat(
-                [
-                    data_planes[:1],
-                ]
-                * self.middle_z_idx
-                + [
-                    data_planes,
-                ],
-                dim=0,
+            self.volume = cat_z_tensors(
+                torch.stack(
+                    [
+                        data_planes[0],
+                    ]
+                    * self.middle_z_idx
+                ),
+                data_planes,
             )
         else:
             self.volume = data_planes.clone()
@@ -117,9 +135,12 @@ class ThresholdFilter3D:
 
     def append(
         self,
-        data_planes: torch.Tensor,
-        marked_planes: torch.Tensor,
-        *side_data: torch.Tensor | np.ndarray,
+        data_planes: torch.Tensor | Sequence[torch.Tensor],
+        marked_planes: torch.Tensor | Sequence[torch.Tensor],
+        *side_data: torch.Tensor
+        | np.ndarray
+        | Sequence[torch.Tensor]
+        | Sequence[np.ndarray],
     ) -> None:
         """
         Add a new z-stack to the filter.
@@ -139,12 +160,12 @@ class ThresholdFilter3D:
             The z-stack. There can be one or more planes in the stack, but it
             must have 3 dimensions. Input data is not modified.
         """
-        if data_planes.shape != marked_planes.shape:
+        if len(data_planes) != len(marked_planes):
             raise ValueError(
                 "Both data and marked planes must have same shape"
             )
         for sdata in side_data:
-            if data_planes.shape[0] != sdata.shape[0]:
+            if len(data_planes) != len(sdata):
                 raise ValueError(
                     "Side data must have same number of planes as data"
                 )
@@ -155,9 +176,7 @@ class ThresholdFilter3D:
             del self.marked_planes[:remaining_start]
             del self.side_data[:remaining_start]
 
-        for i in range(marked_planes.shape[0]):
-            self.marked_planes.append(marked_planes[i, ...])
-
+        self.marked_planes.extend(marked_planes)
         self.side_data.extend(zip(*side_data))
 
     def flush(self) -> bool:

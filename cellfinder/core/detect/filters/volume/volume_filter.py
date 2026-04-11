@@ -428,10 +428,10 @@ class VolumeFilter:
             if tf is not None:
                 # pass through tf if using
                 tf.append(
-                    torch.stack(enhanced),
-                    torch.stack(binarized),
-                    np.stack(raw_data),
-                    torch.stack(masks),
+                    enhanced,
+                    binarized,
+                    raw_data,
+                    masks,
                 )
                 if not tf.ready:
                     # wait for more data before we can use any tf results
@@ -478,10 +478,10 @@ class VolumeFilter:
             if tf is not None:
                 # pass through tf if using
                 tf.append(
-                    torch.stack(enhanced),
-                    torch.stack(binarized),
-                    np.stack(raw_data),
-                    torch.stack(masks),
+                    enhanced,
+                    binarized,
+                    raw_data,
+                    masks,
                 )
                 if tf.ready:
                     # it's ready to pass on to bf
