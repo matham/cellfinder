@@ -176,30 +176,30 @@ def ball_filter_imgs(
         else:
             raw_planes_in = None
             if raw_volume is not None:
-                raw_planes_in = raw_volume[z: z + batch_size, :, :]
-            bf.append(volume[z: z + batch_size, :, :], raw_planes=raw_planes_in)
-
+                raw_planes_in = raw_volume[z : z + batch_size, :, :]
+            bf.append(
+                volume[z : z + batch_size, :, :].clone(),
+                raw_planes=raw_planes_in,
+            )
 
         if bf.ready:
             bf.walk()
 
             middle_planes = bf.get_processed_planes()
             raw_planes = None if raw_volume is None else bf.get_raw_planes()
-            n = middle_planes.shape[0]
+            n = len(middle_planes)
 
             # we edit volume, but only for planes already processed that won't
             # be passed to the filter in this run
-            volume[start_z : start_z + n, :, :] = torch.from_numpy(
-                middle_planes
-            )
+            for i in range(n):
+                volume[start_z + i, :, :] = torch.from_numpy(middle_planes[i])
             start_z += n
 
-            # convert to type needed for detection
-            middle_planes = detection_convert(middle_planes)
             for i, plane in enumerate(middle_planes):
                 raw_plane = None if raw_volume is None else raw_planes[i]
+                # convert to type needed for detection
                 previous_plane = cell_detector.process(
-                    plane, previous_plane, raw_plane
+                    detection_convert(plane), previous_plane, raw_plane
                 )
 
     return cell_detector

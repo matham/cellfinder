@@ -956,7 +956,7 @@ class DetectionDebug:
                 )
 
             # bf.append(bin_peaks, inside, np_input)
-            bf.inside_brain_tiles = None
+            bf.use_mask = False
             bf.append(bin_peaks, None, np_input)
 
         if not bf.ready:

@@ -64,24 +64,6 @@ def get_kernel(ball_xy_size: int, ball_z_size: int) -> np.ndarray:
     return kernel
 
 
-def cat_z_tensors(
-    volume: torch.Tensor | None,
-    planes: torch.Tensor | Sequence[torch.Tensor],
-) -> torch.Tensor:
-    volumes = [] if volume is None else [volume]
-
-    if isinstance(planes, torch.Tensor):
-        # it's already a single 3d tensor
-        volumes.append(planes)
-    else:
-        # it's a list of 2d tensors - make it 3d
-        volumes.extend([p[None, ...] for p in planes])
-
-    if len(volumes) == 1:
-        return volumes[0]
-    return torch.cat(volumes, dim=0)
-
-
 class BallFilter:
     """
     A 3D ball filter.
@@ -136,7 +118,7 @@ class BallFilter:
     """
 
     # the inside brain tiled mask, if tiles are used (use_mask is True)
-    inside_brain_tiles: torch.Tensor | None = None
+    inside_brain_tiles: list[torch.Tensor] = []
 
     def __init__(
         self,
@@ -159,6 +141,7 @@ class BallFilter:
         self.overlap_fraction = overlap_fraction
         self.tile_step_height = tile_height
         self.tile_step_width = tile_width
+        self.use_mask = use_mask
 
         d1 = plane_height
         d2 = plane_width
@@ -184,23 +167,13 @@ class BallFilter:
             # torch at one point threw a cuda memory error when splitting cells
             # on cpu due to pinning. It's best to only pin on using cuda
             kernel.pin_memory()
-        # add 2 dimensions at the start so we have 11ZYX We need this shape in
-        # the conv step
-        self.kernel = (
-            kernel.unsqueeze(0)
-            .unsqueeze(0)
-            .to(device=torch_device, non_blocking=True)
-        )
+        self.kernel = kernel.to(device=torch_device, non_blocking=True)
 
         self.num_batches_before_ready = int(
             math.ceil(self.ball_z_size / batch_size)
         )
-        # Stores the current planes that are being filtered. Start with no data
-        self.volume = torch.empty(
-            (0, plane_height, plane_width),
-            dtype=getattr(torch, dtype),
-            device=torch_device,
-        )
+        # Stores the current planes that are being filtered. Elements are z
+        self.planes = []
         # Index of the middle plane in the volume
         self.middle_z_idx = int(np.floor(self.ball_z_size / 2))
         # the raw input planes, we track along with the filtered planes
@@ -208,19 +181,14 @@ class BallFilter:
 
         if not use_mask:
             return
-        # first axis is z
-        n_vertical_tiles = int(np.ceil(plane_height / self.tile_step_height))
-        n_horizontal_tiles = int(np.ceil(plane_width / self.tile_step_width))
-        # Stores tile masks. We start with no data
-        self.inside_brain_tiles = torch.empty(
-            (
-                0,
-                n_vertical_tiles,
-                n_horizontal_tiles,
-            ),
-            dtype=torch.bool,
-            device=torch_device,
+        self.n_vertical_tiles = int(
+            np.ceil(plane_height / self.tile_step_height)
         )
+        self.n_horizontal_tiles = int(
+            np.ceil(plane_width / self.tile_step_width)
+        )
+        # Stores tile masks. Elements are z
+        self.inside_brain_tiles = []
 
     @classmethod
     def min_xy_padding(cls, ball_xy_size: int) -> tuple[int, int]:
@@ -269,7 +237,7 @@ class BallFilter:
         Return whether enough planes have been appended to run the filter
         using `walk`.
         """
-        return self.volume.shape[0] >= self.kernel_z_size
+        return len(self.planes) >= self.kernel_z_size
 
     def append(
         self,
@@ -311,61 +279,52 @@ class BallFilter:
 
             If provided, the planes can be gotten via `get_raw_planes`.
         """
-        if self.volume.shape[0]:
-            if self.volume.shape[0] < self.kernel_z_size:
-                num_remaining_with_padding = self.volume.shape[0]
+        if len(self.planes):
+            if len(self.planes) < self.kernel_z_size:
+                num_remaining_with_padding = len(self.planes)
             else:
                 num_remaining = self.kernel_z_size - (self.middle_z_idx + 1)
                 num_remaining_with_padding = num_remaining + self.middle_z_idx
-            remaining_start = self.volume.shape[0] - num_remaining_with_padding
+            remaining_start = len(self.planes) - num_remaining_with_padding
 
-            self.volume = cat_z_tensors(
-                self.volume[remaining_start:, :, :], planes
-            )
+            del self.planes[:remaining_start]
+            self.planes.extend(planes)
 
             if raw_planes is not None:
-                if isinstance(raw_planes, np.ndarray):
-                    raw_planes =  list(raw_planes)
-                self.raw_planes = self.raw_planes[remaining_start:] + raw_planes
+                del self.raw_planes[:remaining_start]
+                self.raw_planes.extend(raw_planes)
 
-            if self.inside_brain_tiles is not None:
-                self.inside_brain_tiles = cat_z_tensors(
-                    self.inside_brain_tiles[remaining_start:, :, :], masks
-                )
+            if self.use_mask:
+                del self.inside_brain_tiles[:remaining_start]
+                self.inside_brain_tiles.extend(masks)
         elif self.middle_z_idx > 0:
             # need to pad the start before middle plane
             pad = self.middle_z_idx
 
             pad_planes = torch.zeros(
-                (pad, *self.volume.shape[1:]),
-                dtype=self.volume.dtype,
-                device=self.volume.device,
+                (pad, *planes[0].shape),
+                dtype=planes[0].dtype,
+                device=planes[0].device,
             )
-            self.volume = cat_z_tensors(pad_planes, planes)
+            self.planes = list(pad_planes) + list(planes)
 
-            if self.inside_brain_tiles is not None:
+            if self.use_mask:
                 pad_inside = torch.zeros(
-                    (pad, *self.inside_brain_tiles.shape[1:]),
-                    dtype=self.inside_brain_tiles.dtype,
-                    device=self.inside_brain_tiles.device,
+                    (pad, *masks[0].shape),
+                    dtype=masks[0].dtype,
+                    device=masks[0].device,
                 )
-                self.inside_brain_tiles = cat_z_tensors(pad_inside, masks)
+                self.inside_brain_tiles = list(pad_inside) + list(masks)
 
             if raw_planes is not None:
                 # if ndarray it's converted to list of planes, otherwise it's
                 # already a list of planes that is copied
                 self.raw_planes = list(raw_planes)
         else:
-            if isinstance(planes, torch.Tensor):
-                # if we keep original input, clone it first
-                planes = planes.clone()
-            self.volume = cat_z_tensors(None, planes)
+            self.planes = list(planes)
 
-            if self.inside_brain_tiles is not None:
-                if isinstance(masks, torch.Tensor):
-                    # if we keep original input, clone it first
-                    masks = masks.clone()
-                self.inside_brain_tiles = cat_z_tensors(None, masks)
+            if self.use_mask:
+                self.inside_brain_tiles = list(masks)
 
             if raw_planes is not None:
                 # if ndarray it's converted to list of planes, otherwise it's
@@ -379,21 +338,21 @@ class BallFilter:
         # we need this many at end to process last plane
         pad = self.ball_z_size - self.middle_z_idx - 1
 
-        if not self.volume.shape[0] or not pad:
+        if not self.planes or not pad:
             return False
 
-        vol = self.volume
-        inside = self.inside_brain_tiles
+        plane = self.planes[0]
 
         pad_planes = torch.zeros(
-            (pad, vol.shape[1], vol.shape[2]),
-            dtype=vol.dtype,
-            device=vol.device,
+            (pad, *plane.shape),
+            dtype=plane.dtype,
+            device=plane.device,
         )
         pad_inside = None
-        if inside is not None:
+        if self.use_mask:
+            inside = self.inside_brain_tiles[0]
             pad_inside = torch.zeros(
-                (pad, inside.shape[1], inside.shape[2]),
+                (pad, *inside.shape),
                 dtype=inside.dtype,
                 device=inside.device,
             )
@@ -402,7 +361,7 @@ class BallFilter:
 
         return True
 
-    def get_processed_planes(self) -> np.ndarray:
+    def get_processed_planes(self) -> list[np.ndarray]:
         """
         After passing enough planes to `append`, and after `walk`, this returns
         a copy of the processed planes as a single numpy z-stack.
@@ -418,15 +377,13 @@ class BallFilter:
         if not self.ready:
             raise TypeError("Not enough planes were appended")
 
-        num_processed = self.volume.shape[0] - self.kernel_z_size + 1
+        num_processed = len(self.planes) - self.kernel_z_size + 1
         assert num_processed
         middle = self.middle_z_idx
-        planes = (
-            self.volume[middle : middle + num_processed, :, :]
-            .cpu()
-            .numpy()
-            .copy()
-        )
+        planes = [
+            p.cpu().numpy().copy()
+            for p in self.planes[middle : middle + num_processed]
+        ]
 
         return planes
 
@@ -444,7 +401,7 @@ class BallFilter:
         if not self.ready:
             raise TypeError("Not enough planes were appended")
 
-        num_processed = self.volume.shape[0] - self.kernel_z_size + 1
+        num_processed = len(self.planes) - self.kernel_z_size + 1
         assert num_processed
 
         raw_planes = self.raw_planes[:num_processed]
@@ -470,8 +427,8 @@ class BallFilter:
             self.THRESHOLD_VALUE,
             self.SOMA_CENTRE_VALUE,
             self.kernel,
-            self.volume,
-            self.inside_brain_tiles,
+            self.planes,
+            self.inside_brain_tiles if self.use_mask else None,
         )
 
 
@@ -485,33 +442,40 @@ def _walk(
     threshold_value: int,
     soma_centre_value: int,
     kernel: torch.Tensor,
-    volume: torch.Tensor,
-    inside_brain_tiles: torch.Tensor | None,
+    planes: list[torch.Tensor],
+    inside_brain_tiles: list[torch.Tensor] | None,
 ):
-    num_process = volume.shape[0] - kernel_z_size + 1
-    height, width = volume.shape[1:]
-    num_z = kernel.shape[2]
+    num_process = len(planes) - kernel_z_size + 1
+    height, width = planes[0].shape
+    kz, kh, kw = kernel.shape
+    plane_h = height - kh + 1
+    plane_w = width - kw + 1
+    kz = kw
 
     # threshold volume so it's zero/one. And add two dims at start so
-    # it's 11ZYX
-    volume_tresh = (
-        (volume >= threshold_value)
-        .unsqueeze(0)
-        .unsqueeze(0)
-        .type(kernel.dtype)
-    )
+    # it's 11YX
+    planes_tresh = [(p >= threshold_value).type(kernel.dtype) for p in planes]
 
-    # we do a plane at a time, volume: i:i+num_z, for plane i+middle
+    # we do a plane at a time, planes: i:i+kz, for plane i+middle
     for i in range(num_process):
         # spherical kernel is symmetric so convolution=correlation. Use
         # binary threshold mask over the kernel to sum the value of the
         # kernel at voxels that are bright
-        overlap = F.conv3d(
-            volume_tresh[:, :, i : i + num_z, :, :],
-            kernel,
-            stride=1,
-            padding="valid",
-        )[0, 0, 0, :, :]
+        overlap = torch.zeros(
+            (plane_h, plane_w), dtype=kernel.dtype, device=kernel.device
+        )
+        for plane, k_plane in zip(planes_tresh[i : i + kz], kernel):
+            overlap_plane = F.conv2d(
+                plane[None, None, ...],
+                k_plane[None, None, ...],
+                padding="valid",
+            )
+            overlap += overlap_plane[0, 0, :, :]
+        # overlap = F.conv3d(
+        #     torch.stack(planes_tresh[i : i + kz])[None, None, ...],
+        #     kernel[None, None, ...],
+        #     padding="valid"
+        # )[0, 0, 0, :, :]
         overlaps = overlap > overlap_threshold
 
         # only edit the volume that is valid - conv excludes edges so we
@@ -519,8 +483,7 @@ def _walk(
         height_valid, width_valid = overlaps.shape
         height_offset = (height - height_valid) // 2
         width_offset = (width - width_valid) // 2
-        sub_volume = volume[
-            i + middle,
+        sub_plane = planes[i + middle][
             height_offset : height_offset + height_valid,
             width_offset : width_offset + width_valid,
         ]
@@ -529,7 +492,7 @@ def _walk(
         if inside_brain_tiles is not None:
             # unfold tiles to cover the full voxel area each tile covers
             inside = (
-                inside_brain_tiles[i + middle, :, :]
+                inside_brain_tiles[i + middle][:, :]
                 .repeat_interleave(tile_step_height, dim=0)
                 .repeat_interleave(tile_step_width, dim=1)
             )
@@ -540,8 +503,8 @@ def _walk(
             ]
 
             # must have enough ball overlap to be bright/tile is in brain
-            sub_volume[torch.logical_and(overlaps, inside)] = soma_centre_value
+            sub_plane[torch.logical_and(overlaps, inside)] = soma_centre_value
 
         else:
             # must have enough ball overlap to be bright
-            sub_volume[overlaps] = soma_centre_value
+            sub_plane[overlaps] = soma_centre_value

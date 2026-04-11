@@ -6,24 +6,6 @@ import torch
 import torch.nn.functional as F
 
 
-def cat_z_tensors(
-    volume: torch.Tensor | None,
-    planes: torch.Tensor | Sequence[torch.Tensor],
-) -> torch.Tensor:
-    volumes = [] if volume is None else [volume]
-
-    if isinstance(planes, torch.Tensor):
-        # it's already a single 3d tensor
-        volumes.append(planes)
-    else:
-        # it's a list of 2d tensors - make it 3d
-        volumes.extend([p[None, ...] for p in planes])
-
-    if len(volumes) == 1:
-        return volumes[0]
-    return torch.cat(volumes, dim=0)
-
-
 class ThresholdFilter3D:
     """
     A 3D ball filter.
@@ -71,7 +53,35 @@ class ThresholdFilter3D:
         batch_size: int = 1,
         torch_device: str = "cpu",
     ):
+        # we do 50% overlap of tiles so there's no jumps at boundaries
+        stride_xy = tile_xy_size // 2
+        # make tile even for ease of computation
+        tile_xy_size = stride_xy * 2
+
+        # Due to 50% overlap, to get tiles we move the tile by half tile
+        # (stride). Total moves will be y // stride - 2 (we start already
+        # with mask on first tile). So add back 1 for the first tile. Partial
+        # tiles are dropped
+        n_y_tiles = max(plane_height // stride_xy - 1, 1) if stride_xy else 1
+        n_x_tiles = max(plane_width // stride_xy - 1, 1) if stride_xy else 1
+        do_tile_y = n_y_tiles >= 2
+        do_tile_x = n_x_tiles >= 2
+
+        # num edge pixels dropped b/c moving by stride would move tile off edge
+        self.y_rem = plane_height % stride_xy
+        self.x_rem = plane_width % stride_xy
+
+        self.stride_xy = stride_xy
         self.tile_xy_size = tile_xy_size
+        self.n_x_tiles = n_x_tiles
+        self.n_y_tiles = n_y_tiles
+        self.do_tile_x = do_tile_x
+        self.do_tile_y = do_tile_y
+        # we want at least one axis to have at least two tiles
+        self.has_tiles = tile_xy_size >= 2 and (do_tile_y or do_tile_x)
+
+        self.plane_height = plane_height
+        self.plane_width = plane_width
         self.tile_z_size = tile_z_size
         self.n_sds_above_mean_thresh = n_sds_above_mean_thresh
         self.threshold_value = threshold_value
@@ -79,15 +89,12 @@ class ThresholdFilter3D:
         self.num_batches_before_ready = int(
             math.ceil(self.tile_z_size / batch_size)
         )
-        # Stores the current planes that are being filtered. Start with no data
-        self.volume = torch.empty(
-            (0, plane_height, plane_width),
-            dtype=getattr(torch, dtype),
-            device=torch_device,
-        )
-        # Index of the middle plane in the volume
+        # Index of the middle plane in the planes
         self.middle_z_idx = int(np.floor(self.tile_z_size / 2))
 
+        # Stores the current planes that are being filtered
+        self.planes = []
+        self.unfolded_planes = []
         self.marked_planes: list[torch.Tensor] = []
         self.side_data: list[Sequence[torch.Tensor | np.ndarray]] = []
 
@@ -97,39 +104,42 @@ class ThresholdFilter3D:
         Return whether enough planes have been appended to run the filter
         using `walk`.
         """
-        return self.volume.shape[0] >= self.tile_z_size
+        return len(self.planes) >= self.tile_z_size
 
-    def _append_to_volume(
-        self, data_planes: torch.Tensor | Sequence[torch.Tensor]
+    def _append_to_planes(
+        self,
+        planes: Sequence[torch.Tensor],
+        unfolded_planes: Sequence[torch.Tensor],
     ) -> int:
         """
         Append new data to volume and remove previously processed volume data.
         """
         remaining_start = 0
-        if self.volume.shape[0]:
-            if self.volume.shape[0] < self.tile_z_size:
-                num_remaining_with_padding = self.volume.shape[0]
+        if len(self.planes):
+            if len(self.planes) < self.tile_z_size:
+                num_remaining_with_padding = len(self.planes)
             else:
                 num_remaining = self.tile_z_size - (self.middle_z_idx + 1)
                 num_remaining_with_padding = num_remaining + self.middle_z_idx
-            remaining_start = self.volume.shape[0] - num_remaining_with_padding
+            remaining_start = len(self.planes) - num_remaining_with_padding
 
-            self.volume = cat_z_tensors(
-                self.volume[remaining_start:, :, :], data_planes
-            )
+            del self.unfolded_planes[:remaining_start]
+            self.unfolded_planes.extend(unfolded_planes)
+
+            del self.planes[:remaining_start]
+            self.planes.extend(planes)
         elif self.middle_z_idx > 0:
             # need to pad the start before middle plane
-            self.volume = cat_z_tensors(
-                torch.stack(
-                    [
-                        data_planes[0],
-                    ]
-                    * self.middle_z_idx
-                ),
-                data_planes,
-            )
+            self.unfolded_planes = [
+                unfolded_planes[0] for _ in range(self.middle_z_idx)
+            ]
+            self.unfolded_planes.extend(unfolded_planes)
+
+            self.planes = [planes[0] for _ in range(self.middle_z_idx)]
+            self.planes.extend(planes)
         else:
-            self.volume = data_planes.clone()
+            self.unfolded_planes = list(unfolded_planes)
+            self.planes = list(planes)
 
         return remaining_start
 
@@ -170,7 +180,30 @@ class ThresholdFilter3D:
                     "Side data must have same number of planes as data"
                 )
 
-        remaining_start = self._append_to_volume(data_planes)
+        # num edge pixels dropped b/c moving by stride would move tile off edge
+        unfolded_planes = []
+        for plane in data_planes:
+            if self.do_tile_y:
+                plane = plane[self.y_rem // 2 :, :]
+            if self.do_tile_x:
+                plane = plane[:, self.x_rem // 2 :]
+
+            # add empty channel dim after z "batch" dim -> zcyx
+            plane = plane[None, None, :, :]
+            # unfold -> 3 dim, z, M, L. L is number of tiles, M is tile area
+            unfolded = F.unfold(
+                plane,
+                (
+                    self.tile_xy_size if self.do_tile_y else self.plane_height,
+                    self.tile_xy_size if self.do_tile_x else self.plane_width,
+                ),
+                stride=self.stride_xy,
+            )
+            unfolded_planes.append(unfolded[0, :, :])
+
+        remaining_start = self._append_to_planes(
+            list(data_planes), unfolded_planes
+        )
 
         if remaining_start:
             del self.marked_planes[:remaining_start]
@@ -186,18 +219,13 @@ class ThresholdFilter3D:
         # we need this many at end to process last plane
         pad = self.tile_z_size - self.middle_z_idx - 1
 
-        if not self.volume.shape[0] or not pad:
+        if not len(self.planes) or not pad:
             return False
 
-        last_plane = self.volume[-1:, ...]
-        data = torch.cat(
-            [
-                last_plane,
-            ]
-            * pad,
-            dim=0,
+        self._append_to_planes(
+            [self.planes[-1] for _ in range(pad)],
+            [self.unfolded_planes[-1] for _ in range(pad)],
         )
-        self._append_to_volume(data)
 
         return True
 
@@ -217,7 +245,7 @@ class ThresholdFilter3D:
         if not self.ready:
             raise TypeError("Not enough planes were appended")
 
-        num_processed = self.volume.shape[0] - self.tile_z_size + 1
+        num_processed = len(self.planes) - self.tile_z_size + 1
         assert num_processed
 
         return self.marked_planes[:num_processed]
@@ -228,7 +256,7 @@ class ThresholdFilter3D:
         if not self.ready:
             raise TypeError("Not enough planes were appended")
 
-        num_processed = self.volume.shape[0] - self.tile_z_size + 1
+        num_processed = len(self.planes) - self.tile_z_size + 1
         assert num_processed
 
         side_data = [list(s) for s in zip(*self.side_data[:num_processed])]
@@ -245,11 +273,21 @@ class ThresholdFilter3D:
         if not self.ready:
             raise TypeError("Called walk before enough planes were appended")
 
+        if not self.has_tiles:
+            return
+
         _threshold_volume(
+            self.planes,
+            self.unfolded_planes,
             self.marked_planes,
-            self.volume,
-            self.tile_xy_size,
             self.tile_z_size,
+            self.x_rem,
+            self.y_rem,
+            self.n_x_tiles,
+            self.n_y_tiles,
+            self.do_tile_x,
+            self.do_tile_y,
+            self.stride_xy,
             self.middle_z_idx,
             self.n_sds_above_mean_thresh,
             self.threshold_value,
@@ -258,10 +296,17 @@ class ThresholdFilter3D:
 
 @torch.jit.script
 def _threshold_volume(
+    data_planes: list[torch.Tensor],
+    unfolded_planes: list[torch.Tensor],
     marked_planes: list[torch.Tensor],
-    data_planes: torch.Tensor,
-    tile_xy_size: int,
     tile_z_size: int,
+    x_rem: int,
+    y_rem: int,
+    n_x_tiles: int,
+    n_y_tiles: int,
+    do_tile_x: bool,
+    do_tile_y: bool,
+    stride_xy: int,
     middle_z_idx: int,
     n_sds_above_mean_thresh: float,
     threshold_value: int,
@@ -271,24 +316,8 @@ def _threshold_volume(
     enhanced_plane > mean + n_sds_above_mean_thresh*std. Each plane will be
     set to zero elsewhere.
     """
-    num_process = data_planes.shape[0] - tile_z_size + 1
-    y, x = data_planes.shape[1:]
-
-    # we do 50% overlap so there's no jumps at boundaries
-    stride_xy = tile_xy_size // 2
-    # make tile even for ease of computation
-    tile_xy_size = stride_xy * 2
-    # Due to 50% overlap, to get tiles we move the tile by half tile (stride).
-    # Total moves will be y // stride - 2 (we start already with mask on first
-    # tile). So add back 1 for the first tile. Partial tiles are dropped
-    n_y_tiles = max(y // stride_xy - 1, 1) if stride_xy else 1
-    n_x_tiles = max(x // stride_xy - 1, 1) if stride_xy else 1
-    do_tile_y = n_y_tiles >= 2
-    do_tile_x = n_x_tiles >= 2
-
-    # we want at least one axis to have at least two tiles
-    if tile_xy_size < 2 or (not do_tile_y) and (not do_tile_x):
-        return
+    num_process = len(data_planes) - tile_z_size + 1
+    y, x = data_planes[0].shape
 
     # # in 2d filters each plane is independently normalized so absolute values
     # # mean nothing between planes. By normalizing to mean/std, assuming
@@ -301,31 +330,12 @@ def _threshold_volume(
     # std[std == 0] = 1
     # data_planes.div_(std)
 
-    # num edge pixels dropped b/c moving by stride would move tile off edge
-    y_rem = y % stride_xy
-    x_rem = x % stride_xy
-    data_planes_raw = data_planes
-    if do_tile_y:
-        data_planes = data_planes[:, y_rem // 2 :, :]
-    if do_tile_x:
-        data_planes = data_planes[:, :, x_rem // 2 :]
-
-    # add empty channel dim after z "batch" dim -> zcyx
-    data_planes = data_planes.unsqueeze(1)
-    # unfold makes it 3 dim, z, M, L. L is number of tiles, M is tile area
-    unfolded = F.unfold(
-        data_planes,
-        (tile_xy_size if do_tile_y else y, tile_xy_size if do_tile_x else x),
-        stride=stride_xy,
-    )
-
     # we do a plane at a time, volume: i:i+num_z for plane i+middle. And unlike
     # xy where we stride at 50% tile size, for z we stride plane by plane
     for i in range(num_process):
         # average the tile areas, for each tile
-        std, mean = torch.std_mean(
-            unfolded[i : i + tile_z_size, :, :], dim=(0, 1)
-        )
+        stack = torch.stack(unfolded_planes[i : i + tile_z_size])
+        std, mean = torch.std_mean(stack, dim=(0, 1))
         threshold = mean + n_sds_above_mean_thresh * std
 
         # reshape it back into Y by X tiles, instead of YX being one dim
@@ -343,7 +353,7 @@ def _threshold_volume(
             if do_tile:
                 repeats = (
                     torch.ones(
-                        n_tiles, dtype=torch.int, device=data_planes.device
+                        n_tiles, dtype=torch.int, device=data_planes[0].device
                     )
                     * stride_xy
                 )
@@ -367,7 +377,7 @@ def _threshold_volume(
         plane = marked_planes[i]
         above = torch.logical_and(
             plane == threshold_value,
-            data_planes_raw[middle_z_idx + i, :, :] > threshold,
+            data_planes[middle_z_idx + i] > threshold,
         )
 
         t = torch.tensor(

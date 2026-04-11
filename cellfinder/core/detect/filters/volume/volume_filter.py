@@ -632,21 +632,18 @@ class VolumeFilter:
             if msg is EOFSignal:
                 return
 
-            # convert plane to the type needed by detection system
-            # we should not need scaling because throughout
-            # filtering we make sure result fits in this data type
             middle_planes, raw_planes, token = msg
-            detection_middle_planes = detection_converter(middle_planes)
 
             logger.debug(f"🏫 Detecting structures for planes {self.z}+")
-            for raw_plane, plane, detection_plane in zip(
-                raw_planes, middle_planes, detection_middle_planes
-            ):
+            for raw_plane, plane in zip(raw_planes, middle_planes):
                 if save_planes:
                     self.save_plane(plane.astype(original_dtype))
 
+                # convert plane to the type needed by detection system
+                # we should not need scaling because throughout
+                # filtering we make sure result fits in this data type
                 previous_plane = detector.process(
-                    detection_plane, previous_plane, raw_plane
+                    detection_converter(plane), previous_plane, raw_plane
                 )
 
                 if callback is not None:

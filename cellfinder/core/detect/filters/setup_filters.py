@@ -5,7 +5,7 @@ Container for all the settings used during 2d/3d filtering and cell detection.
 import math
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Callable, Optional, Tuple, Type
+from typing import Callable, Literal, Optional, Tuple, Type
 
 import numpy as np
 from brainglobe_utils.general.system import get_num_processes
@@ -130,6 +130,8 @@ class DetectionSettings:
     Gaussian filter width (as a fraction of soma diameter) used during
     2d in-plane Laplacian of Gaussian filtering.
     """
+
+    peaks_filter_type: Literal["2d", "3d_faces", "3d_full"] = "2d"
 
     n_sds_above_mean_thresh: float = 10
     """

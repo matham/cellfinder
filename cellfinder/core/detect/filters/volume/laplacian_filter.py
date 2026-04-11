@@ -1,5 +1,5 @@
 import math
-from typing import Sequence
+from typing import Literal, Sequence
 
 import numpy as np
 import torch
@@ -114,6 +114,7 @@ class LaplacianFilter3D:
         dtype: str,
         batch_size: int = 1,
         torch_device: str = "cpu",
+        filter_type: Literal["2d", "3d_faces", "3d_full"] = "2d",
     ):
         self.num_batches_before_ready = int(math.ceil(3 / batch_size))
         self.planes = []
@@ -123,8 +124,18 @@ class LaplacianFilter3D:
 
         self.side_data: list[Sequence[torch.Tensor | np.ndarray]] = []
 
+        match filter_type:
+            case "2d":
+                kernel = get_5_stencil_2d(voxel_sizes)
+            case "3d_faces":
+                kernel = get_7_stencil(voxel_sizes)
+            case "3d_full":
+                kernel = get_27_stencil(voxel_sizes)
+            case _:
+                raise ValueError(f"Unknown filter volume type {filter_type}")
+
         kernel = torch.tensor(
-            get_27_stencil(voxel_sizes).tolist(),
+            kernel.tolist(),
             dtype=getattr(torch, dtype),
             device=torch_device,
             pin_memory=torch_device != "cpu",

@@ -215,6 +215,7 @@ def main(
         n_free_cpus=n_free_cpus,
         ball_overlap_fraction=ball_overlap_fraction,
         log_sigma_size=log_sigma_size,
+        peaks_filter_type="2d",
         n_sds_above_mean_thresh=n_sds_above_mean_thresh,
         n_sds_above_mean_tiled_thresh=n_sds_above_mean_tiled_thresh,
         tiled_thresh_tile_size=tiled_thresh_tile_size,
