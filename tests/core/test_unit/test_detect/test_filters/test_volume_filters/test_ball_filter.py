@@ -66,7 +66,7 @@ def test_filter_plane_params(sizes, batch_size):
 
     assert not bf.ready
     assert not bf.planes
-    assert not bf.inside_brain_tiles.shape[0]
+    assert not bf.inside_brain_tiles
 
     planes = torch.zeros(
         (batch_size, bf_kwargs["plane_height"], bf_kwargs["plane_width"]),

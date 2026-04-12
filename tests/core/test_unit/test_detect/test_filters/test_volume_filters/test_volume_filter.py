@@ -278,4 +278,6 @@ def test_3d_filtering(
     cells_our = set(cells_our)
     cells = set(cells)
     diff = len(cells_our - cells) + len(cells - cells_our)
+    print(sorted([(c.x, c.y, c.z) for c in cells_our - cells]))
+    print(sorted([(c.x, c.y, c.z) for c in cells - cells_our]))
     assert diff <= cell_tol

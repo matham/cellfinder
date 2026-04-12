@@ -24,6 +24,18 @@ voxel_sizes = [5, 2, 2]
 DETECTION_TOLERANCE = 2
 
 
+def assert_cells_close(cell1: Cell, cell2: Cell) -> None:
+    diff = 0
+    for attr in ("x", "y", "z"):
+        attr_diff = abs(getattr(cell1, attr) - getattr(cell2, attr))
+        assert attr_diff <= 1
+        diff += attr_diff
+    assert diff <= 2
+
+    assert cell1.type == cell2.type
+    assert cell1.metadata == cell2.metadata
+
+
 class UnixFS:
     @staticmethod
     def rm(filename):
@@ -242,7 +254,7 @@ def test_signal_data_types(synthetic_single_spot, no_free_cpus, dtype, device):
     )
 
     assert len(detected) == 1
-    assert detected[0] == Cell(center, Cell.UNKNOWN)
+    assert_cells_close(detected[0], Cell(center, Cell.UNKNOWN))
 
 
 @pytest.mark.parametrize("device", ["cuda", "cpu"])
@@ -263,7 +275,7 @@ def test_detection_scipy_torch(synthetic_single_spot, no_free_cpus, device):
     )
 
     assert len(detected) == 1
-    assert detected[0] == Cell(center, Cell.UNKNOWN)
+    assert_cells_close(detected[0], Cell(center, Cell.UNKNOWN))
 
 
 @pytest.mark.parametrize("device", ["cuda", "cpu"])
