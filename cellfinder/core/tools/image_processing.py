@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 import tqdm
 from brainglobe_utils.general.numerical import is_even
 
@@ -148,3 +149,34 @@ def dataset_mean_std(
     std = np.sqrt(var_sample)
 
     return mean.item(), std.item()
+
+
+@torch.jit.script
+def batch_tiled_mean_std(
+    planes_tiled_mean: list[torch.Tensor] | torch.Tensor,
+    planes_tiled_uncorrected_var: list[torch.Tensor] | torch.Tensor,
+    tile_size: int,
+    correction: int = 1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # based on https://math.stackexchange.com/a/2971563. If all group sample
+    # size is the same, it's easily generalizable to arbitrary number of groups
+    if isinstance(planes_tiled_mean, torch.Tensor):
+        planes_tiled_mean = list(planes_tiled_mean)
+    if isinstance(planes_tiled_uncorrected_var, torch.Tensor):
+        planes_tiled_uncorrected_var = list(planes_tiled_uncorrected_var)
+
+    n = len(planes_tiled_mean)
+    global_tiled_mean = torch.zeros_like(planes_tiled_mean[0])
+    for plane_tiled_mean in planes_tiled_mean:
+        global_tiled_mean += plane_tiled_mean / n
+
+    global_tiled_var = torch.zeros_like(planes_tiled_uncorrected_var[0])
+    for tiled_mean, tiled_var in zip(
+        planes_tiled_mean, planes_tiled_uncorrected_var
+    ):
+        global_tiled_var += tiled_var
+        global_tiled_var += tiled_mean - global_tiled_mean
+    global_tiled_var *= tile_size / (n * tile_size - correction)
+
+    global_tiled_std = torch.sqrt(global_tiled_var)
+    return global_tiled_mean, global_tiled_std

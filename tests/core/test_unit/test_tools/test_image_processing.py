@@ -2,6 +2,7 @@ import random
 
 import numpy as np
 import pytest
+import torch
 
 from cellfinder.core.tools import image_processing as img_tools
 
@@ -49,3 +50,27 @@ def test_dataset_mean_std(progress):
     # give it enough room for estimation error
     assert 90 < mean < 110
     assert 8 < std < 12
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_tiled_var(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("Cuda is not available")
+
+    # 10 planes, each with tiles containing 9 elements, and 16 tiles
+    data = torch.arange(
+        10 * 9 * 16, dtype=torch.float32, device=device
+    ).reshape((10, 9, 16))
+    data = torch.concat([data, data * 10000, data / 10000], dim=0)
+
+    for i in range(data.shape[0]):
+        batch = data[max(0, i - 4) : i + 1, :, :]
+        var, mean = torch.var_mean(batch, dim=1, correction=0)
+        torch_std, torch_mean = torch.std_mean(batch, dim=(0, 1), correction=1)
+
+        our_mean, our_std = img_tools.batch_tiled_mean_std(mean, var, 9)
+        assert our_mean.shape == (16,)
+        assert our_std.shape == (16,)
+
+        torch.allclose(our_mean, torch_mean)
+        torch.allclose(our_std, torch_std)

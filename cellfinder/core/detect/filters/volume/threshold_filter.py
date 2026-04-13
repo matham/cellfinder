@@ -5,6 +5,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from cellfinder.core.tools.image_processing import batch_tiled_mean_std
+
 
 class ThresholdFilter3D:
     """
@@ -40,6 +42,8 @@ class ThresholdFilter3D:
     The number of batches of size `batch_size` passed to `append`
     before `ready` would return True.
     """
+
+    tiled_mean_var: list[tuple[torch.Tensor, torch.Tensor]]
 
     def __init__(
         self,
@@ -94,7 +98,7 @@ class ThresholdFilter3D:
 
         # Stores the current planes that are being filtered
         self.planes = []
-        self.unfolded_planes = []
+        self.tiled_mean_var = []
         self.marked_planes: list[torch.Tensor] = []
         self.side_data: list[Sequence[torch.Tensor | np.ndarray]] = []
 
@@ -109,7 +113,7 @@ class ThresholdFilter3D:
     def _append_to_planes(
         self,
         planes: Sequence[torch.Tensor],
-        unfolded_planes: Sequence[torch.Tensor],
+        tiled_mean_var: list[tuple[torch.Tensor, torch.Tensor]],
     ) -> int:
         """
         Append new data to volume and remove previously processed volume data.
@@ -123,22 +127,22 @@ class ThresholdFilter3D:
                 num_remaining_with_padding = num_remaining + self.middle_z_idx
             remaining_start = len(self.planes) - num_remaining_with_padding
 
-            del self.unfolded_planes[:remaining_start]
-            self.unfolded_planes.extend(unfolded_planes)
+            del self.tiled_mean_var[:remaining_start]
+            self.tiled_mean_var.extend(tiled_mean_var)
 
             del self.planes[:remaining_start]
             self.planes.extend(planes)
         elif self.middle_z_idx > 0:
             # need to pad the start before middle plane
-            self.unfolded_planes = [
-                unfolded_planes[0] for _ in range(self.middle_z_idx)
+            self.tiled_mean_var = [
+                tiled_mean_var[0] for _ in range(self.middle_z_idx)
             ]
-            self.unfolded_planes.extend(unfolded_planes)
+            self.tiled_mean_var.extend(tiled_mean_var)
 
             self.planes = [planes[0] for _ in range(self.middle_z_idx)]
             self.planes.extend(planes)
         else:
-            self.unfolded_planes = list(unfolded_planes)
+            self.tiled_mean_var = list(tiled_mean_var)
             self.planes = list(planes)
 
         return remaining_start
@@ -181,7 +185,8 @@ class ThresholdFilter3D:
                 )
 
         # num edge pixels dropped b/c moving by stride would move tile off edge
-        unfolded_planes = []
+        # todo: handle when no tiling
+        tiled_mean_var = []
         for plane in data_planes:
             if self.do_tile_y:
                 plane = plane[self.y_rem // 2 :, :]
@@ -190,7 +195,7 @@ class ThresholdFilter3D:
 
             # add empty channel dim after z "batch" dim -> zcyx
             plane = plane[None, None, :, :]
-            # unfold -> 3 dim, z, M, L. L is number of tiles, M is tile area
+            # unfold -> 3 dim, z, M, L. M is tile area, L is number of tiles
             unfolded = F.unfold(
                 plane,
                 (
@@ -199,10 +204,12 @@ class ThresholdFilter3D:
                 ),
                 stride=self.stride_xy,
             )
-            unfolded_planes.append(unfolded[0, :, :])
+            var, mean = torch.var_mean(unfolded[0, :, :], dim=0, correction=0)
+
+            tiled_mean_var.append((mean, var))
 
         remaining_start = self._append_to_planes(
-            list(data_planes), unfolded_planes
+            list(data_planes), tiled_mean_var
         )
 
         if remaining_start:
@@ -224,7 +231,7 @@ class ThresholdFilter3D:
 
         self._append_to_planes(
             [self.planes[-1] for _ in range(pad)],
-            [self.unfolded_planes[-1] for _ in range(pad)],
+            [self.tiled_mean_var[-1] for _ in range(pad)],
         )
 
         return True
@@ -278,8 +285,10 @@ class ThresholdFilter3D:
 
         _threshold_volume(
             self.planes,
-            self.unfolded_planes,
+            [p[0] for p in self.tiled_mean_var],
+            [p[1] for p in self.tiled_mean_var],
             self.marked_planes,
+            self.tile_xy_size,
             self.tile_z_size,
             self.x_rem,
             self.y_rem,
@@ -297,8 +306,10 @@ class ThresholdFilter3D:
 @torch.jit.script
 def _threshold_volume(
     data_planes: list[torch.Tensor],
-    unfolded_planes: list[torch.Tensor],
+    planes_mean: list[torch.Tensor],
+    planes_var: list[torch.Tensor],
     marked_planes: list[torch.Tensor],
+    tile_xy_size: int,
     tile_z_size: int,
     x_rem: int,
     y_rem: int,
@@ -318,24 +329,19 @@ def _threshold_volume(
     """
     num_process = len(data_planes) - tile_z_size + 1
     y, x = data_planes[0].shape
-
-    # # in 2d filters each plane is independently normalized so absolute values
-    # # mean nothing between planes. By normalizing to mean/std, assuming
-    # # neighboring planes have somewhat similar stats, we can now tile across
-    # # planes and use the same threshold across neighboring planes
-    # std, mean = torch.std_mean(data_planes, dim=(1, 2), keepdim=True)
-    # # don't edit in place since same plane may be "walked" in multiple calls
-    # data_planes = data_planes - mean
-    # # if min = max = zero, divide by 1 - it'll stay zero
-    # std[std == 0] = 1
-    # data_planes.div_(std)
+    tile_area = tile_xy_size if do_tile_x else 1
+    if do_tile_y:
+        tile_area *= tile_xy_size
 
     # we do a plane at a time, volume: i:i+num_z for plane i+middle. And unlike
     # xy where we stride at 50% tile size, for z we stride plane by plane
     for i in range(num_process):
         # average the tile areas, for each tile
-        stack = torch.stack(unfolded_planes[i : i + tile_z_size])
-        std, mean = torch.std_mean(stack, dim=(0, 1))
+        mean, std = batch_tiled_mean_std(
+            planes_mean[i : i + tile_z_size],
+            planes_var[i : i + tile_z_size],
+            tile_xy_size * tile_xy_size,
+        )
         threshold = mean + n_sds_above_mean_thresh * std
 
         # reshape it back into Y by X tiles, instead of YX being one dim
