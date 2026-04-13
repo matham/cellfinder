@@ -450,7 +450,6 @@ def _walk(
     kz, kh, kw = kernel.shape
     plane_h = height - kh + 1
     plane_w = width - kw + 1
-    kz = kw
 
     # threshold volume so it's zero/one. And add two dims at start so
     # it's 11YX
