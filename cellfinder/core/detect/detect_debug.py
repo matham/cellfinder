@@ -122,7 +122,9 @@ class DataStore:
         tuple[list[torch.Tensor], list[np.ndarray], list[torch.Tensor]] | None
     ) = None
 
-    _filtered_3d_ball_batch: tuple[np.ndarray, list[np.ndarray]] | None = None
+    _filtered_3d_ball_batch: (
+        tuple[list[np.ndarray], list[np.ndarray]] | None
+    ) = None
 
     def __init__(
         self,
@@ -363,7 +365,9 @@ class DataStore:
         self._bin_3d_peaks_batch = value
 
     @property
-    def filtered_3d_ball_batch(self) -> tuple[np.ndarray, list[np.ndarray]]:
+    def filtered_3d_ball_batch(
+        self,
+    ) -> tuple[list[np.ndarray], list[np.ndarray]]:
         if self._filtered_3d_ball_batch is not None:
             return self._filtered_3d_ball_batch
 
@@ -375,11 +379,11 @@ class DataStore:
 
         filtered_3d_ball = self.filtered_3d_ball_data[i : i + batch_size]
         filtered_3d_ball = np.asarray(filtered_3d_ball)
-        return filtered_3d_ball, list(self.input_batch[1])
+        return list(filtered_3d_ball), list(self.input_batch[1])
 
     @filtered_3d_ball_batch.setter
     def filtered_3d_ball_batch(
-        self, value: tuple[np.ndarray, list[np.ndarray]]
+        self, value: tuple[list[np.ndarray], list[np.ndarray]]
     ) -> None:
         self._filtered_3d_ball_batch = value
 
@@ -904,10 +908,10 @@ class DetectionDebug:
                 self.data_store.bin_2d_peaks_batch
             )
             tf.append(
-                torch.stack(enhanced),
-                torch.stack(bin_2d_peaks),  # clone
-                np.stack(np_data),
-                torch.stack(masks),
+                enhanced,
+                bin_2d_peaks,  # clone
+                np_data,
+                masks,
             )
 
         if not tf.ready:
@@ -967,12 +971,12 @@ class DetectionDebug:
         raw_planes = bf.get_raw_planes()
         self.data_store.filtered_3d_ball_batch = data_planes, raw_planes
 
-        buff = data_planes.copy()
-        buff[buff != self.settings.soma_centre_value] = 0
+        for buff in data_planes:
+            buff[buff != self.settings.soma_centre_value] = 0
         self.save_tiffs(
             "filtered_3d_ball",
             i,
-            buff,
+            data_planes,
         )
 
         return i + len(raw_planes)
@@ -993,21 +997,18 @@ class DetectionDebug:
 
         assert self.ball_filter.ready
         data_planes, raw_planes = self.data_store.filtered_3d_ball_batch
-        detection_data_planes = detection_converter(data_planes)
 
-        for k, (plane, raw_plane, detection_plane) in enumerate(
-            zip(data_planes, raw_planes, detection_data_planes)
-        ):
+        for k, (plane, raw_plane) in enumerate(zip(data_planes, raw_planes)):
             previous_plane = self.cell_detector.process(
-                detection_plane, previous_plane, raw_plane
+                detection_converter(plane), previous_plane, raw_plane
             )
             self.save_tiffs(
-                "struct_id",
+                "structs_id",
                 i + k,
                 previous_plane[None, :, :].astype(np.uint32),
             )
 
-        return previous_plane, i + data_planes.shape[0]
+        return previous_plane, i + len(data_planes)
 
     def process_structures_type(
         self,
