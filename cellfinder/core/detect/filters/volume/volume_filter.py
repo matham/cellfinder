@@ -561,8 +561,9 @@ class VolumeFilter:
             for process in used_processors:
                 process.get_msg_from_thread()
             # batch size can change at the end so resize buffer
-            masks = masks[:n, :, :]
-            enhanced = enhanced[:n, :, :]
+            # todo: fix tracking of buffers so we don't have to clone
+            masks = masks[:n, :, :].clone()
+            enhanced = enhanced[:n, :, :].clone()
         else:
             # we're not doing 2d filtering in different process
             # tensor is edited in-place

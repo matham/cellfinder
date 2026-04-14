@@ -284,6 +284,9 @@ def debug_results_callback(
                 bc_y * scale[1] + (final_scale[1] - scale[1]) / 2,
                 bc_x * scale[2] + (final_scale[2] - scale[2]) / 2,
             )
+        elif name == "3D thresholded peaks":
+            if detect_debug.settings.tiled_thresh_tile_size <= 0:
+                continue
 
         stack = read_z_stack(str(data_path))
         if dtype is not None:

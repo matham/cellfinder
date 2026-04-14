@@ -200,8 +200,11 @@ def synthetic_single_spot_large() -> (
     signal_array = np.zeros(shape_zyx)
     background_array = np.zeros_like(signal_array)
     mark_sphere(
-        signal_array, center_xyz=c_xyz, radius=7, center_fill_value=100,
-        outside_fill_value=100
+        signal_array,
+        center_xyz=c_xyz,
+        radius=7,
+        center_fill_value=100,
+        outside_fill_value=100,
     )
 
     # 1 std should be larger, so it can be considered bright
@@ -229,7 +232,10 @@ def synthetic_single_spot_smooth() -> (
     signal_array = np.zeros(shape_zyx)
     background_array = np.zeros_like(signal_array)
     mark_sphere(
-        signal_array, center_xyz=c_xyz, radius=6, center_fill_value=100,
+        signal_array,
+        center_xyz=c_xyz,
+        radius=6,
+        center_fill_value=100,
         outside_fill_value=0,
     )
 
@@ -251,21 +257,21 @@ def synthetic_spot_clusters() -> (
     You must convert it to the right data type for your tests.
     Also, `n_sds_above_mean_thresh` must be 1 or larger.
     """
-    shape_zyx = 20, 100, 100
+    shape_zyx = 30, 100, 100
     radius = 5
     s = 50 - radius * 4
     centers_xyz = [
-        (s, 50, 10),
-        (s + 2 * radius - 1, 50, 10),
-        (s + 4 * radius - 2, 50, 10),
-        (s + 6 * radius - 3, 50, 10),
+        (s, 50, 15),
+        (s + 2 * radius - 1, 50, 15),
+        (s + 4 * radius - 2, 50, 15),
+        (s + 6 * radius - 3, 50, 15),
     ]
 
     signal_array = np.zeros(shape_zyx)
     background_array = np.zeros_like(signal_array)
 
     for center in centers_xyz:
-        mark_sphere(signal_array, center, radius, 100, 100)
+        mark_sphere(signal_array, center, radius, 100, 20)
 
     return signal_array, background_array, centers_xyz
 

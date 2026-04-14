@@ -263,7 +263,7 @@ class BallFilter:
         ----------
         planes : torch.Tensor
             The 2d filtered z-stack. There can be one or more planes in the
-            stack, but it must have 3 dimensions. Input data is not modified.
+            stack, but it must have 3 dimensions. Input data *is* modified.
         masks : torch.Tensor
             A z-stack tile mask, indicating for each tile whether it's in or
             outside the brain. If the latter it's excluded.

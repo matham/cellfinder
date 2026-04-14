@@ -72,8 +72,8 @@ class ThresholdFilter3D:
         do_tile_x = n_x_tiles >= 2
 
         # num edge pixels dropped b/c moving by stride would move tile off edge
-        self.y_rem = plane_height % stride_xy
-        self.x_rem = plane_width % stride_xy
+        self.y_rem = plane_height % stride_xy if stride_xy else 0
+        self.x_rem = plane_width % stride_xy if stride_xy else 0
 
         self.stride_xy = stride_xy
         self.tile_xy_size = tile_xy_size
@@ -127,17 +127,19 @@ class ThresholdFilter3D:
                 num_remaining_with_padding = num_remaining + self.middle_z_idx
             remaining_start = len(self.planes) - num_remaining_with_padding
 
-            del self.tiled_mean_var[:remaining_start]
-            self.tiled_mean_var.extend(tiled_mean_var)
+            if self.has_tiles:
+                del self.tiled_mean_var[:remaining_start]
+                self.tiled_mean_var.extend(tiled_mean_var)
 
             del self.planes[:remaining_start]
             self.planes.extend(planes)
         elif self.middle_z_idx > 0:
             # need to pad the start before middle plane
-            self.tiled_mean_var = [
-                tiled_mean_var[0] for _ in range(self.middle_z_idx)
-            ]
-            self.tiled_mean_var.extend(tiled_mean_var)
+            if self.has_tiles:
+                self.tiled_mean_var = [
+                    tiled_mean_var[0] for _ in range(self.middle_z_idx)
+                ]
+                self.tiled_mean_var.extend(tiled_mean_var)
 
             self.planes = [planes[0] for _ in range(self.middle_z_idx)]
             self.planes.extend(planes)
@@ -185,28 +187,38 @@ class ThresholdFilter3D:
                 )
 
         # num edge pixels dropped b/c moving by stride would move tile off edge
-        # todo: handle when no tiling
         tiled_mean_var = []
-        for plane in data_planes:
-            if self.do_tile_y:
-                plane = plane[self.y_rem // 2 :, :]
-            if self.do_tile_x:
-                plane = plane[:, self.x_rem // 2 :]
+        if self.has_tiles:
+            for plane in data_planes:
+                if self.do_tile_y:
+                    plane = plane[self.y_rem // 2 :, :]
+                if self.do_tile_x:
+                    plane = plane[:, self.x_rem // 2 :]
 
-            # add empty channel dim after z "batch" dim -> zcyx
-            plane = plane[None, None, :, :]
-            # unfold -> 3 dim, z, M, L. M is tile area, L is number of tiles
-            unfolded = F.unfold(
-                plane,
-                (
-                    self.tile_xy_size if self.do_tile_y else self.plane_height,
-                    self.tile_xy_size if self.do_tile_x else self.plane_width,
-                ),
-                stride=self.stride_xy,
-            )
-            var, mean = torch.var_mean(unfolded[0, :, :], dim=0, correction=0)
+                # add empty channel dim after z "batch" dim -> zcyx
+                plane = plane[None, None, :, :]
+                # unfold -> 3 dim: z, M, L. M = tile area, L = number of tiles
+                unfolded = F.unfold(
+                    plane,
+                    (
+                        (
+                            self.tile_xy_size
+                            if self.do_tile_y
+                            else self.plane_height
+                        ),
+                        (
+                            self.tile_xy_size
+                            if self.do_tile_x
+                            else self.plane_width
+                        ),
+                    ),
+                    stride=self.stride_xy,
+                )
+                var, mean = torch.var_mean(
+                    unfolded[0, :, :], dim=0, correction=0
+                )
 
-            tiled_mean_var.append((mean, var))
+                tiled_mean_var.append((mean, var))
 
         remaining_start = self._append_to_planes(
             list(data_planes), tiled_mean_var

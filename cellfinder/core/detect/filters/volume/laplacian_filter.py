@@ -153,27 +153,28 @@ class LaplacianFilter3D:
         """
         return len(self.planes) >= 3
 
+    @property
+    def num_processed(self) -> int:
+        if not self.ready:
+            return 0
+
+        return len(self.planes) - 2
+
     def _append(self, planes: list[torch.Tensor]) -> int:
         """
         Append new data to volume and remove previously processed volume data.
         """
-        remaining_start = 0
+        num_processed = self.num_processed
         if self.planes:
-            if len(self.planes) < 3:
-                # we haven't processed any yet
-                remaining_start = 0
-            else:
-                # if we had 3+ planes, we previously processed this many. E.g.
-                # with 3 planes, we processed only one plane before
-                remaining_start = len(self.planes) - 2
-                del self.planes[:remaining_start]
+            if num_processed:
+                del self.planes[:num_processed]
 
             self.planes.extend(planes)
         else:
             # need to pad with 1 start plane before middle plane
             self.planes = [planes[0].clone()] + list(planes)
 
-        return remaining_start
+        return num_processed
 
     def append(
         self,
@@ -210,11 +211,11 @@ class LaplacianFilter3D:
             F.pad(p[None, None, ...], (1, 1, 1, 1), "replicate")
             for p in planes
         ]
-        remaining_start = self._append(planes)
+        num_processed = self._append(planes)
 
-        if remaining_start:
-            del self.side_data[:remaining_start]
-            del self.processed_planes[:remaining_start]
+        if num_processed:
+            del self.side_data[:num_processed]
+            del self.processed_planes[:num_processed]
 
         # convert to list of if size z, with tuples of 2d xy planes
         self.side_data.extend(zip(*side_data))
@@ -227,11 +228,11 @@ class LaplacianFilter3D:
             return False
 
         # we just need one plane of padding at the end
-        remaining_start = self._append([self.planes[-1].clone()])
+        num_processed = self._append([self.planes[-1].clone()])
 
-        if remaining_start:
-            del self.side_data[:remaining_start]
-            del self.processed_planes[:remaining_start]
+        if num_processed:
+            del self.side_data[:num_processed]
+            del self.processed_planes[:num_processed]
 
         return True
 
@@ -250,11 +251,7 @@ class LaplacianFilter3D:
         """
         if not self.ready:
             raise TypeError("Not enough planes were appended")
-
-        num_processed = len(self.planes) - 2
-        assert num_processed
-        assert num_processed == len(self.processed_planes)
-
+        assert self.num_processed
         return self.processed_planes[:]
 
     def get_processed_side_data_planes(
@@ -262,11 +259,11 @@ class LaplacianFilter3D:
     ) -> list[list[torch.Tensor | np.ndarray]]:
         if not self.ready:
             raise TypeError("Not enough planes were appended")
+        assert self.num_processed
 
-        num_processed = len(self.planes) - 2
-        assert num_processed
-
-        side_data = [list(s) for s in zip(*self.side_data[:num_processed])]
+        side_data = [
+            list(s) for s in zip(*self.side_data[: self.num_processed])
+        ]
         return side_data
 
     def walk(self) -> None:

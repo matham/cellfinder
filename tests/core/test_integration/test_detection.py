@@ -24,13 +24,13 @@ voxel_sizes = [5, 2, 2]
 DETECTION_TOLERANCE = 2
 
 
-def assert_cells_close(cell1: Cell, cell2: Cell) -> None:
+def assert_cells_close(cell1: Cell, cell2: Cell, max_dist: int = 0) -> None:
     diff = 0
     for attr in ("x", "y", "z"):
         attr_diff = abs(getattr(cell1, attr) - getattr(cell2, attr))
         assert attr_diff <= 1
         diff += attr_diff
-    assert diff <= 2
+    assert diff <= max_dist
 
     assert cell1.type == cell2.type
     assert cell1.metadata == cell2.metadata
@@ -279,28 +279,47 @@ def test_detection_scipy_torch(synthetic_single_spot, no_free_cpus, device):
 
 
 @pytest.mark.parametrize("device", ["cuda", "cpu"])
+@pytest.mark.parametrize("batch_size", [1, 4])
 def test_detection_cluster_splitting(
-    synthetic_spot_clusters, no_free_cpus, device
+    synthetic_spot_clusters,
+    no_free_cpus,
+    device,
+    batch_size,
 ):
     """
     Test cluster splitting for overlapping cells.
 
     Test filtering/detection on cpu and cuda. Because splitting is only on cpu
     so make sure if detection is on cuda, splitting still works.
+
+    Also, we test the full stack this way with different batch sizes to catch
+    any issues along the way.
     """
 
     if device == "cuda" and not torch.cuda.is_available():
         pytest.xfail("Cuda is not available")
 
     signal_array, background_array, centers_xyz = synthetic_spot_clusters
-    signal_array = signal_array.astype(np.uint16)
+    signal_array = signal_array.astype(np.uint16).copy()
 
     detected = detect_main(
         signal_array,
-        n_sds_above_mean_thresh=1.0,
-        voxel_sizes=voxel_sizes,
+        voxel_sizes=(1, 1, 1),
+        soma_diameter=5,
+        log_sigma_size=0.6,
+        n_sds_above_mean_thresh=3,
+        ball_xy_size=3,
+        ball_z_size=3,
+        ball_overlap_fraction=0.6,
+        soma_spread_factor=1.4,
+        max_cluster_size=1000000,
+        split_ball_xy_size=3,
+        split_ball_z_size=3,
+        split_ball_overlap_fraction=0.8,
+        n_splitting_iter=10,
         n_free_cpus=no_free_cpus,
         torch_device=device,
+        batch_size=batch_size,
     )
 
     assert len(detected) == len(centers_xyz)
@@ -311,7 +330,7 @@ def test_detection_cluster_splitting(
         assert cell.type == Cell.UNKNOWN
 
 
-def test_detection_cell_too_large(synthetic_spot_clusters, no_free_cpus):
+def test_detection_cell_too_large(no_free_cpus):
     """
     Test we detect one big artifact if the signal has a too large foreground
     structure.
