@@ -127,7 +127,9 @@ class DebugWorker(Worker):
         if DetectionDebug.needs_crop(debug.bottom_corner, debug.top_corner):
             bot_y, bot_x = debug.bottom_corner
             top_y, top_x = debug.top_corner
-            plane_size = top_y - bot_y, top_x - bot_x
+            bot_x = max(bot_x, 0)
+            bot_y = max(bot_y, 0)
+            plane_size = max(top_y - bot_y, 0), max(top_x - bot_x, 0)
 
         start = max(start, 0)
         end = min(len(arr) if end <= 0 else end, len(arr))

@@ -675,11 +675,6 @@ class DetectionDebug:
                 "be provided"
             )
 
-        if data.shape[0] != self.signal_shape[0]:
-            raise ValueError(
-                f"Expected {self.signal_shape[0]} planes, got {data.shape[0]}"
-            )
-
         if dtype is not None:
             data = data.astype(dtype)
 
@@ -749,7 +744,7 @@ class DetectionDebug:
             "top_corner": top_corner,
             "input": (
                 ""
-                if signal is None or isinstance(signal, np.ndarray)
+                if signal is None or isinstance(signal, types.array)
                 else str(signal)
             ),
         }
@@ -954,7 +949,6 @@ class DetectionDebug:
                     self.data_store.bin_2d_peaks_batch
                 )
             else:
-                assert tf.ready
                 bin_peaks, np_input, inside = (
                     self.data_store.bin_3d_peaks_batch
                 )
@@ -995,7 +989,6 @@ class DetectionDebug:
 
         detection_converter = self.settings.detection_data_converter_func
 
-        assert self.ball_filter.ready
         data_planes, raw_planes = self.data_store.filtered_3d_ball_batch
 
         for k, (plane, raw_plane) in enumerate(zip(data_planes, raw_planes)):
