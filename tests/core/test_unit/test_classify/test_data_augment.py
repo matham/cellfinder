@@ -200,8 +200,6 @@ def test_no_augment(cube_with_side_dot, name, value):
     assert (
         not augmenter.update_parameters()
     ), "Parameters should not be randomized"
-    assert not augmenter._do_affine
-    assert not augmenter._axes_to_flip
     augmented = augmenter(cube_with_side_dot)
 
     assert augmented.shape == cube_with_side_dot.shape
@@ -230,11 +228,10 @@ def test_augment_translate(cube_with_side_dot, reorder):
     )
     assert augmenter.update_parameters(), "Parameters should be randomized"
     # affine is needed for translate/rotate/scale
-    assert augmenter._asked_affine
-    assert augmenter._do_affine
+    assert augmenter.needs_isotropic
+    assert augmenter._translate_trans is not None
     # the cube is not cube but cuboid, so need to make iso before transforming
     assert not augmenter._is_isotropic
-    assert not augmenter._axes_to_flip
     augmented = augmenter(cube_with_side_dot)
 
     assert augmented.shape == cube_with_side_dot.shape
@@ -266,11 +263,10 @@ def test_augment_rotate(cube_with_side_dot, reorder):
     )
     assert augmenter.update_parameters(), "Parameters should be randomized"
     # afine is needed for translate/rotate/scale
-    assert augmenter._asked_affine
-    assert augmenter._do_affine
+    assert augmenter.needs_isotropic
+    assert augmenter._rotate_trans is not None
     # the cube is not cube but cuboid, so need to make iso before transforming
     assert not augmenter._is_isotropic
-    assert not augmenter._axes_to_flip
     augmented = augmenter(cube_with_side_dot)
 
     assert augmented.shape == cube_with_side_dot.shape
@@ -314,11 +310,10 @@ def test_augment_scale(cube_with_center_dot, reorder):
     )
     assert augmenter.update_parameters(), "Parameters should be randomized"
     # affine is needed for translate/rotate/scale
-    assert augmenter._asked_affine
-    assert augmenter._do_affine
+    assert augmenter.needs_isotropic
+    assert augmenter._scale_trans is not None
     # the cube is not cube but cuboid, so need to make iso before transforming
     assert not augmenter._is_isotropic
-    assert not augmenter._axes_to_flip
     augmented = augmenter(cube_with_center_dot)
 
     assert augmented.shape == cube_with_center_dot.shape
@@ -382,10 +377,7 @@ def test_augment_axis_flip(cube_with_side_dot, reorder):
     )
     assert augmenter.update_parameters(), "Parameters should be randomized"
     # afine is not needed when only flipping axes
-    assert not augmenter._asked_affine
-    assert not augmenter._do_affine
-    assert not augmenter._is_isotropic
-    assert augmenter._axes_to_flip
+    assert not augmenter.needs_isotropic
     augmented = augmenter(cube_with_side_dot)
 
     assert augmented.shape == cube_with_side_dot.shape
@@ -421,10 +413,8 @@ def test_channels_are_identically_augmented(reorder):
         data_dim_order=data_dim_order,
     )
     assert augmenter.update_parameters(), "Parameters should be randomized"
-    assert augmenter._asked_affine
-    assert augmenter._do_affine
+    assert augmenter.needs_isotropic
     assert not augmenter._is_isotropic
-    assert augmenter._axes_to_flip
 
     augmented = augmenter(data)
 

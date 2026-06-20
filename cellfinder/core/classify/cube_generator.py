@@ -666,6 +666,7 @@ class CuboidDatasetBase(Dataset):
         rotate_range: RandRange = (math.pi / 4,) * 3,
         translate_range: RandRange = (0.05,) * 3,
         scale_range: RandRange = ((0.6, 1.4),) * 3,
+        intensity_range: float | tuple[float, float] | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -735,6 +736,7 @@ class CuboidDatasetBase(Dataset):
                 translate_range,
                 scale_range,
                 rotate_range,
+                intensity_range,
             )
 
         if src_image_data is not None:
